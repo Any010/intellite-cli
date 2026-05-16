@@ -1,0 +1,108 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish to npm. Leave false to run packaging and attestations only."
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Use npm with trusted publishing support
+        run: |
+          npm install -g npm@11.14.1
+          node --version
+          npm --version
+
+      - name: Verify
+        run: npm run verify
+
+      - name: Check package version
+        id: version
+        shell: bash
+        run: |
+          PACKAGE_VERSION=$(node -p "require('./package.json').version")
+          echo "version=${PACKAGE_VERSION}" >> "${GITHUB_OUTPUT}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            EXPECTED_TAG="v${PACKAGE_VERSION}"
+            if [ "${GITHUB_REF_NAME}" != "${EXPECTED_TAG}" ]; then
+              echo "Tag ${GITHUB_REF_NAME} does not match package version ${PACKAGE_VERSION}." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Pack
+        id: pack
+        shell: bash
+        run: |
+          PACK_OUTPUT=$(npm pack --json)
+          printf '%s\n' "${PACK_OUTPUT}"
+          TARBALL=$(printf '%s' "${PACK_OUTPUT}" | node -e "let s=''; process.stdin.on('data', d => s += d); process.stdin.on('end', () => { const start = s.indexOf('['); const end = s.lastIndexOf(']'); const data = JSON.parse(s.slice(start, end + 1)); console.log(data[0].filename); });")
+          echo "tarball=${PWD}/${TARBALL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate SBOM
+        run: npm sbom --sbom-format cyclonedx --sbom-type application > intellite-cli.sbom.json
+
+      - name: Attest tarball
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.pack.outputs.tarball }}
+
+      - name: Attest SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ steps.pack.outputs.tarball }}
+          sbom-path: intellite-cli.sbom.json
+
+      - name: Upload release package
+        uses: actions/upload-artifact@v4
+        with:
+          name: intellite-${{ steps.version.outputs.version }}-npm-package
+          path: |
+            ${{ steps.pack.outputs.tarball }}
+            intellite-cli.sbom.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Clean generated release files
+        run: rm -f intellite-*.tgz intellite-cli.sbom.json
+
+      - name: Dry-run publish
+        if: ${{ github.ref_type != 'tag' && inputs.publish != 'true' }}
+        run: npm publish --access public --dry-run
+
+      - name: Publish to npm
+        if: ${{ github.ref_type == 'tag' || inputs.publish == 'true' }}
+        run: npm publish --access public
