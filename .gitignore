@@ -1,0 +1,8 @@
+node_modules/
+coverage/
+dist/
+*.tgz
+*.sbom.json
+.env
+.env.*
+!.env.example

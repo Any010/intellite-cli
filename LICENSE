@@ -1,0 +1,27 @@
+Intellite CLI License
+
+Copyright (c) 2026 Intellite.
+
+This package is published publicly so authorized Intellite users can install
+and run the Intellite command line client. Permission is granted to download,
+install, and execute this package solely for the purpose of accessing the
+Intellite service through official Intellite APIs.
+
+You may not:
+
+1. copy, modify, sublicense, sell, rent, lease, or distribute this package
+   except as needed for normal installation from the npm registry;
+2. reverse engineer, decompile, or attempt to derive source code or service
+   internals from this package;
+3. use this package to bypass access controls, rate limits, authentication,
+   authorization, auditing, or other service protections;
+4. use the Intellite name, logo, domain, or package name in a way that implies
+   endorsement or affiliation without written permission.
+
+This package is provided "as is", without warranty of any kind, express or
+implied, including but not limited to warranties of merchantability, fitness
+for a particular purpose, and noninfringement. In no event shall the copyright
+holder be liable for any claim, damages, or other liability arising from or in
+connection with this package or its use.
+
+All rights not expressly granted in this license are reserved.

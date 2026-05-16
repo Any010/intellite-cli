@@ -1,0 +1,46 @@
+{
+  "name": "intellite",
+  "version": "0.3.0",
+  "description": "Command line client for Intellite AI assistant connections.",
+  "type": "module",
+  "bin": {
+    "intellite": "bin/intellite.mjs"
+  },
+  "files": [
+    "bin/intellite.mjs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --check bin/intellite.mjs && node bin/intellite.mjs help",
+    "security:secrets": "node scripts/secret-scan.mjs",
+    "security:audit": "npm audit --omit=dev --audit-level=moderate",
+    "security": "npm run security:secrets && npm run security:audit",
+    "verify:package": "node scripts/verify-package.mjs && node scripts/verify-tarball.mjs",
+    "verify": "npm test && npm run security && npm run verify:package",
+    "prepack": "node scripts/verify-package.mjs",
+    "prepublishOnly": "node scripts/verify-package.mjs && node bin/intellite.mjs help"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "homepage": "https://intellite.app",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Any010/intellite-cli.git"
+  },
+  "bugs": {
+    "url": "https://intellite.app"
+  },
+  "keywords": [
+    "intellite",
+    "cli",
+    "ai",
+    "assistant",
+    "api"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
