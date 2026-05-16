@@ -104,8 +104,20 @@ jobs:
       - name: Clean generated release files
         run: rm -f intellite-*.tgz intellite-cli.sbom.json
 
-      - name: Dry-run publish
+      - name: Check whether package version is already published
+        id: published
         if: ${{ github.ref_type != 'tag' && inputs.publish != 'true' }}
+        shell: bash
+        run: |
+          if npm view "intellite@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "exists=true" >> "${GITHUB_OUTPUT}"
+            echo "intellite@${{ steps.version.outputs.version }} is already published; skipping npm publish dry-run."
+          else
+            echo "exists=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Dry-run publish
+        if: ${{ github.ref_type != 'tag' && inputs.publish != 'true' && steps.published.outputs.exists != 'true' }}
         run: npm publish --access public --dry-run
 
       - name: Publish to npm
