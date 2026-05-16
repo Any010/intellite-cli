@@ -37,12 +37,28 @@ function run(command, args) {
   });
 }
 
+async function verifyWithRetry(command, args) {
+  const attempts = 6;
+  let lastError = null;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await run(command, args);
+    } catch (error) {
+      lastError = error;
+      const detail = error instanceof Error ? error.message : String(error);
+      if (!detail.includes("ETARGET") || attempt === attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 5000));
+    }
+  }
+  throw lastError;
+}
+
 try {
   const command = process.platform === "win32" ? "cmd.exe" : "npx";
   const args = process.platform === "win32"
     ? ["/d", "/s", "/c", "npx", "--prefix", prefix, "--yes", `intellite@${version}`, "help"]
     : ["--prefix", prefix, "--yes", `intellite@${version}`, "help"];
-  const { stdout } = await run(command, args);
+  const { stdout } = await verifyWithRetry(command, args);
   if (!stdout.includes("intellite") || !stdout.includes("INTELLITE_TOKEN_STORE")) {
     throw new Error("Published CLI help output did not match the expected Intellite CLI.");
   }
