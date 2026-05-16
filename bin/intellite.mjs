@@ -25,7 +25,7 @@ function usage() {
   console.log(`intellite
 
 Commands:
-  login [--name NAME] [--permission APP_ID:CAPABILITY]
+  login [--name NAME] [--permission APP_ID:CAPABILITY] [--force]
   status
   setup
   skills
@@ -385,8 +385,25 @@ async function login(args) {
   if (args.includes("--base-url")) {
     throw new Error("This CLI connects to https://intellite.app. Custom API endpoints are not supported in the public package.");
   }
+  const force = args.includes("--force");
+  const tokenFromEnv = Boolean(process.env.INTELLITE_TOKEN);
+  const existingConfig = await readConfig();
+  if (!force && existingConfig?.token) {
+    try {
+      const { body } = await authenticatedRequest("/api/intellite/status");
+      console.log(`Already logged in: ${body.org?.name || body.org?.id || ""} / ${body.account?.name || body.account?.email || ""}`);
+      await setupSkills({ quiet: false });
+      return;
+    } catch (error) {
+      if (tokenFromEnv) {
+        throw new Error(`INTELLITE_TOKEN is set but could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      await clearConfig();
+    }
+  }
   const name = argValue(args, "--name", "AI assistant on this PC");
   const permissions = requestedPermissions(args);
+  const previousToken = !tokenFromEnv && existingConfig?.token ? existingConfig.token : "";
   const codeVerifier = randomVerifier();
   const codeChallenge = sha256Base64url(codeVerifier);
   const { body } = await request("/api/intellite/device/start", {
@@ -418,6 +435,7 @@ async function login(args) {
     }
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (previousToken) await revokeToken(previousToken).catch(() => null);
     await writeConfig({
       token: result.token,
       expiresAt: result.expiresAt,
@@ -457,6 +475,16 @@ async function authenticatedFetch(pathname, options = {}) {
     headers: {
       ...(options.headers || {}),
       "X-Intellite-Token": config.token
+    }
+  });
+}
+
+async function revokeToken(token) {
+  if (!token) return;
+  await request("/api/intellite/token/revoke", {
+    method: "POST",
+    headers: {
+      "X-Intellite-Token": token
     }
   });
 }

@@ -18,14 +18,14 @@ npx intellite login
 npx intellite status
 ```
 
-The login command opens a browser approval page. After approval, an app-permission token is stored on the local machine. The CLI uses the OS credential store when available and keeps only non-secret metadata in `~/.intellite/config.json`.
+The login command reuses the existing local token when it is still valid. If no valid token exists, it opens a browser approval page. After approval, an app-permission token is stored on the local machine. The CLI uses the OS credential store when available and keeps only non-secret metadata in `~/.intellite/config.json`.
 
 After login, the CLI automatically syncs the Intellite skills available to the signed-in account into the local Intellite skills directory. Set `INTELLITE_SKILLS_DIR` when an AI assistant uses a specific local skill directory. The npm package itself does not include app-specific skills.
 
 ## Commands
 
 ```bash
-npx intellite login [--name "AI assistant on this PC"]
+npx intellite login [--name "AI assistant on this PC"] [--force]
 npx intellite status
 npx intellite setup
 npx intellite skills
@@ -36,7 +36,7 @@ npx intellite api POST /api/example --body input.json
 npx intellite download /api/example/file --output output.bin
 ```
 
-By default, login requests the app permissions available to the signed-in account. Advanced callers can request a narrower token with `--permission APP_ID:CAPABILITY`.
+By default, login requests the app permissions available to the signed-in account. Advanced callers can request a narrower token with `--permission APP_ID:CAPABILITY`. Use `--force` only when intentionally replacing the local connection; the previous local token is revoked after the new one is issued.
 
 Skill sync can also be run explicitly:
 
