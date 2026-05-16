@@ -111,3 +111,7 @@ jobs:
       - name: Publish to npm
         if: ${{ github.ref_type == 'tag' || inputs.publish == 'true' }}
         run: npm publish --access public
+
+      - name: Verify published CLI
+        if: ${{ github.ref_type == 'tag' || inputs.publish == 'true' }}
+        run: node scripts/verify-published.mjs "${{ steps.version.outputs.version }}"

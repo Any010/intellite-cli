@@ -17,6 +17,7 @@
     "security:audit": "npm audit --omit=dev --audit-level=moderate",
     "security": "npm run security:secrets && npm run security:audit",
     "verify:package": "node scripts/verify-package.mjs && node scripts/verify-tarball.mjs",
+    "verify:published": "node scripts/verify-published.mjs",
     "verify": "npm test && npm run security && npm run verify:package",
     "prepack": "node scripts/verify-package.mjs",
     "prepublishOnly": "node scripts/verify-package.mjs && node bin/intellite.mjs help"
