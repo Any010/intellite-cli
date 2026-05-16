@@ -391,9 +391,14 @@ async function login(args) {
   if (!force && existingConfig?.token) {
     try {
       const { body } = await authenticatedRequest("/api/intellite/status");
-      console.log(`Already logged in: ${body.org?.name || body.org?.id || ""} / ${body.account?.name || body.account?.email || ""}`);
-      await setupSkills({ quiet: false });
-      return;
+      const missingPermissions = await currentMissingPermissions();
+      if (missingPermissions.length > 0) {
+        console.log(`Existing login is valid, but app permissions changed. Re-approval is required for ${missingPermissions.length} permission(s).`);
+      } else {
+        console.log(`Already logged in: ${body.org?.name || body.org?.id || ""} / ${body.account?.name || body.account?.email || ""}`);
+        await setupSkills({ quiet: false });
+        return;
+      }
     } catch (error) {
       if (tokenFromEnv) {
         throw new Error(`INTELLITE_TOKEN is set but could not be verified: ${error instanceof Error ? error.message : String(error)}`);
@@ -516,6 +521,22 @@ async function fetchSkills() {
       }));
     })()
   }));
+}
+
+function permissionKey(permission) {
+  return `${permission.appId}\u0000${permission.capability}`;
+}
+
+async function currentMissingPermissions() {
+  const skills = await fetchSkills();
+  const missing = [];
+  for (const skill of skills) {
+    const granted = new Set(skill.grantedPermissions.map(permissionKey));
+    for (const permission of skill.requiredPermissions) {
+      if (!granted.has(permissionKey(permission))) missing.push({ skill: skill.name, ...permission });
+    }
+  }
+  return missing;
 }
 
 function normalizePermissionList(value) {
