@@ -8,8 +8,7 @@ import { spawn } from "node:child_process";
 const DEFAULT_BASE_URL = "https://intellite.app";
 const CONFIG_DIR = path.join(os.homedir(), ".intellite");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
-const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
-const SKILLS_DIR = process.env.INTELLITE_SKILLS_DIR || path.join(CODEX_HOME, "skills");
+const SKILLS_DIR = process.env.INTELLITE_SKILLS_DIR || path.join(CONFIG_DIR, "skills");
 const MANAGED_SKILL_FILE = ".intellite-managed.json";
 const TOKEN_SERVICE = "intellite-cli";
 const TOKEN_ACCOUNT = "default";
@@ -345,7 +344,7 @@ function safeSkillFilePath(value) {
   return raw.replace(/\\/g, "/");
 }
 
-function codexSkillsDir() {
+function localSkillsDir() {
   return path.resolve(SKILLS_DIR);
 }
 
@@ -386,7 +385,7 @@ async function login(args) {
   if (args.includes("--base-url")) {
     throw new Error("This CLI connects to https://intellite.app. Custom API endpoints are not supported in the public package.");
   }
-  const name = argValue(args, "--name", `${os.userInfo().username || "user"} Codex`);
+  const name = argValue(args, "--name", "AI assistant on this PC");
   const permissions = requestedPermissions(args);
   const codeVerifier = randomVerifier();
   const codeChallenge = sha256Base64url(codeVerifier);
@@ -504,7 +503,7 @@ function normalizePermissionList(value) {
 }
 
 async function managedSkillDirectories() {
-  const root = codexSkillsDir();
+  const root = localSkillsDir();
   let entries = [];
   try {
     entries = await fs.readdir(root, { withFileTypes: true });
@@ -527,7 +526,7 @@ async function managedSkillDirectories() {
 
 async function setupSkills({ quiet = false } = {}) {
   const skills = await fetchSkills();
-  const root = codexSkillsDir();
+  const root = localSkillsDir();
   await fs.mkdir(root, { recursive: true });
   const current = new Set(skills.map((skill) => skill.name));
 

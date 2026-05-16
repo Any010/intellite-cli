@@ -20,12 +20,12 @@ npx intellite status
 
 The login command opens a browser approval page. After approval, an app-permission token is stored on the local machine. The CLI uses the OS credential store when available and keeps only non-secret metadata in `~/.intellite/config.json`.
 
-After login, the CLI automatically syncs the Intellite skills available to the signed-in account into the local Codex skills directory. The npm package itself does not include app-specific skills.
+After login, the CLI automatically syncs the Intellite skills available to the signed-in account into the local Intellite skills directory. Set `INTELLITE_SKILLS_DIR` when an AI assistant uses a specific local skill directory. The npm package itself does not include app-specific skills.
 
 ## Commands
 
 ```bash
-npx intellite login [--name "Codex on this PC"]
+npx intellite login [--name "AI assistant on this PC"]
 npx intellite status
 npx intellite setup
 npx intellite skills

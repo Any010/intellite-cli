@@ -1,6 +1,6 @@
 {
   "name": "intellite",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Command line client for Intellite AI assistant connections.",
   "type": "module",
   "bin": {
