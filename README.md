@@ -18,7 +18,16 @@ npx intellite login
 npx intellite status
 ```
 
+Staging uses the same CLI flow with an explicit environment option:
+
+```bash
+npx intellite --env staging login
+npx intellite --env staging status
+```
+
 The login command reuses the existing local token when it is still valid and already contains the current app permissions. If no valid token exists, or if the user's app access has changed and the token is stale, it opens a browser approval page. After approval, an app-permission token is stored on the local machine. The CLI uses the OS credential store when available and keeps only non-secret metadata in `~/.intellite/config.json`.
+
+Staging stores token/config and synchronized skills separately from production: `~/.intellite/config.staging.json`, `~/.intellite/token.staging.dpapi` on Windows, and `~/.intellite/skills-staging`.
 
 After login, the CLI automatically syncs the Intellite skills available to the signed-in account into the local Intellite skills directory. Set `INTELLITE_SKILLS_DIR` when an AI assistant uses a specific local skill directory. The npm package itself does not include app-specific skills.
 
@@ -35,6 +44,8 @@ npx intellite api GET /api/intellite/audit-events --query limit=50 --query q=use
 npx intellite api POST /api/example --body input.json
 npx intellite download /api/example/file --output output.bin
 ```
+
+Use `--env staging` with the same commands when testing staging.
 
 By default, login requests the app permissions available to the signed-in account. Advanced callers can request a narrower token with `--permission APP_ID:CAPABILITY`. Use `--force` only when intentionally replacing the local connection; the previous local token is revoked after the new one is issued.
 
@@ -53,8 +64,9 @@ npx intellite setup
 - If no OS credential store is available, the CLI falls back to `~/.intellite/config.json` with user-only file permissions and prints a warning.
 - Set `INTELLITE_TOKEN_STORE=secure` to reject fallback file storage.
 - Set `INTELLITE_TOKEN` for ephemeral automation without writing a token to disk.
+- Set `INTELLITE_STAGING_TOKEN` for staging ephemeral automation without writing a token to disk.
 - `logout` revokes the server-side token and removes the local token/config data.
-- The CLI connects only to the production Intellite endpoint.
+- The CLI connects only to official Intellite endpoints selected by `--env production` or `--env staging`.
 - Server-provided download filenames are sanitized before writing files locally.
 - Prefer JSON files over inline `--json` arguments on Windows PowerShell.
 

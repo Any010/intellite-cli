@@ -38,7 +38,6 @@ const forbiddenPatterns = [
   /INTELLITE_TOKEN\s*=/g,
   new RegExp("INTELLITE_" + "BASIC_AUTH", "g"),
   new RegExp("INTELLITE_" + "API_BASE_URL", "g"),
-  new RegExp("intellite-" + "staging", "gi"),
   new RegExp("m-" + "ohyama", "gi")
 ];
 
@@ -95,6 +94,7 @@ for (const file of [...allowedFiles, "scripts/verify-package.mjs"]) {
 const cli = fs.readFileSync(path.join(root, "bin/intellite.mjs"), "utf8");
 if (!cli.startsWith("#!/usr/bin/env node")) fail("CLI file must start with a node shebang.");
 if (!cli.includes("https://intellite.app")) fail("CLI default base URL must be production Intellite.");
+if (!cli.includes("https://intellite-staging.intellite.workers.dev")) fail("CLI staging environment must point to official Intellite staging.");
 if (cli.includes("http://127.0.0.1:3200")) fail("CLI must not default to local development URL.");
 if (cli.includes("\"cmd\"") || cli.includes("\"/c\", \"start\"")) fail("CLI must not open URLs through cmd start.");
 if (cli.includes("process.env." + "INTELLITE_" + "API_BASE_URL")) fail("Public CLI must not support environment-selected API endpoints.");
@@ -105,6 +105,9 @@ if (!cli.includes("windows-dpapi")) fail("CLI must support Windows DPAPI token s
 if (!cli.includes("macos-keychain")) fail("CLI must support macOS Keychain token storage.");
 if (!cli.includes("linux-secret-service")) fail("CLI must support Linux Secret Service token storage.");
 if (!cli.includes("INTELLITE_TOKEN_STORE=secure")) fail("CLI must document strict secure token storage mode.");
+if (!cli.includes("INTELLITE_STAGING_TOKEN")) fail("CLI must support staging token override.");
+if (!cli.includes("config.staging.json")) fail("CLI must separate staging config from production config.");
+if (!cli.includes("skills-staging")) fail("CLI must separate staging skills from production skills.");
 if (cli.includes("command === \"quote\"") || cli.includes("command === \"evidence\"")) fail("Base Intellite CLI must not expose app-specific commands.");
 if (cli.includes("quote calculate") || cli.includes("quote create") || cli.includes("evidence create")) fail("Base Intellite CLI help must stay app-neutral.");
 if (JSON.stringify(packageJson.keywords ?? []).toLowerCase().includes("quote")) fail("package keywords must stay app-neutral.");

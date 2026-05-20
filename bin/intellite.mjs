@@ -5,15 +5,42 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
-const DEFAULT_BASE_URL = "https://intellite.app";
 const CONFIG_DIR = path.join(os.homedir(), ".intellite");
-const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
-const SKILLS_DIR = process.env.INTELLITE_SKILLS_DIR || path.join(CONFIG_DIR, "skills");
+const ENVIRONMENTS = {
+  production: {
+    name: "production",
+    baseUrl: "https://intellite.app",
+    configFileName: "config.json",
+    skillsDirName: "skills",
+    dpapiTokenFileName: "token.dpapi",
+    tokenEnv: "INTELLITE_TOKEN",
+    skillsDirEnv: "INTELLITE_SKILLS_DIR",
+    tokenService: "intellite-cli",
+    tokenAccount: "default",
+    tokenLabel: "Intellite CLI token"
+  },
+  staging: {
+    name: "staging",
+    baseUrl: "https://intellite-staging.intellite.workers.dev",
+    configFileName: "config.staging.json",
+    skillsDirName: "skills-staging",
+    dpapiTokenFileName: "token.staging.dpapi",
+    tokenEnv: "INTELLITE_STAGING_TOKEN",
+    skillsDirEnv: "INTELLITE_STAGING_SKILLS_DIR",
+    tokenService: "intellite-cli-staging",
+    tokenAccount: "staging",
+    tokenLabel: "Intellite CLI staging token"
+  }
+};
+let activeEnvironment = ENVIRONMENTS.production;
+let DEFAULT_BASE_URL = activeEnvironment.baseUrl;
+let CONFIG_FILE = path.join(CONFIG_DIR, activeEnvironment.configFileName);
+let SKILLS_DIR = process.env[activeEnvironment.skillsDirEnv] || path.join(CONFIG_DIR, activeEnvironment.skillsDirName);
 const MANAGED_SKILL_FILE = ".intellite-managed.json";
-const TOKEN_SERVICE = "intellite-cli";
-const TOKEN_ACCOUNT = "default";
-const TOKEN_LABEL = "Intellite CLI token";
-const DPAPI_TOKEN_FILE = path.join(CONFIG_DIR, "token.dpapi");
+let TOKEN_SERVICE = activeEnvironment.tokenService;
+let TOKEN_ACCOUNT = activeEnvironment.tokenAccount;
+let TOKEN_LABEL = activeEnvironment.tokenLabel;
+let DPAPI_TOKEN_FILE = path.join(CONFIG_DIR, activeEnvironment.dpapiTokenFileName);
 const DEFAULT_PERMISSIONS = [];
 const MAX_JSON_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
@@ -33,10 +60,53 @@ Commands:
   api METHOD PATH [--query KEY=VALUE] [--json JSON] [--body FILE]
   download PATH --output FILE
 
+Options:
+  --env production|staging  Target official Intellite environment
+
 Environment:
-  INTELLITE_TOKEN         Token override for ephemeral automation
-  INTELLITE_TOKEN_STORE   auto, secure, or file
+  INTELLITE_TOKEN               Production token override for ephemeral automation
+  INTELLITE_SKILLS_DIR          Production skill sync directory
+  INTELLITE_STAGING_TOKEN       Staging token override for ephemeral automation
+  INTELLITE_STAGING_SKILLS_DIR  Staging skill sync directory
+  INTELLITE_TOKEN_STORE         auto, secure, or file
 `);
+}
+
+function configureEnvironment(name) {
+  const normalized = String(name || "production").trim().toLowerCase();
+  const environment = normalized === "prod" ? ENVIRONMENTS.production : ENVIRONMENTS[normalized];
+  if (!environment) throw new Error(`Unknown environment: ${name}`);
+  activeEnvironment = environment;
+  DEFAULT_BASE_URL = environment.baseUrl;
+  CONFIG_FILE = path.join(CONFIG_DIR, environment.configFileName);
+  SKILLS_DIR = process.env[environment.skillsDirEnv] || path.join(CONFIG_DIR, environment.skillsDirName);
+  TOKEN_SERVICE = environment.tokenService;
+  TOKEN_ACCOUNT = environment.tokenAccount;
+  TOKEN_LABEL = environment.tokenLabel;
+  DPAPI_TOKEN_FILE = path.join(CONFIG_DIR, environment.dpapiTokenFileName);
+}
+
+function extractGlobalOptions(args) {
+  const result = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index];
+    if (value === "--env") {
+      if (index + 1 >= args.length) throw new Error("--env requires production or staging.");
+      configureEnvironment(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--env=")) {
+      configureEnvironment(value.slice("--env=".length));
+      continue;
+    }
+    result.push(value);
+  }
+  return result;
+}
+
+function loginCommandHint() {
+  return activeEnvironment.name === "production" ? "intellite login" : `intellite --env ${activeEnvironment.name} login`;
 }
 
 function argValue(args, name, fallback = "") {
@@ -255,9 +325,10 @@ async function clearLocalToken() {
 }
 
 async function readConfig() {
-  if (process.env.INTELLITE_TOKEN) {
+  const token = process.env[activeEnvironment.tokenEnv];
+  if (token) {
     return {
-      token: process.env.INTELLITE_TOKEN
+      token
     };
   }
   try {
@@ -383,10 +454,10 @@ function openBrowser(url) {
 
 async function login(args) {
   if (args.includes("--base-url")) {
-    throw new Error("This CLI connects to https://intellite.app. Custom API endpoints are not supported in the public package.");
+    throw new Error("Custom API endpoints are not supported. Use --env production or --env staging.");
   }
   const force = args.includes("--force");
-  const tokenFromEnv = Boolean(process.env.INTELLITE_TOKEN);
+  const tokenFromEnv = Boolean(process.env[activeEnvironment.tokenEnv]);
   const existingConfig = await readConfig();
   if (!force && existingConfig?.token) {
     try {
@@ -401,7 +472,7 @@ async function login(args) {
       }
     } catch (error) {
       if (tokenFromEnv) {
-        throw new Error(`INTELLITE_TOKEN is set but could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`${activeEnvironment.tokenEnv} is set but could not be verified: ${error instanceof Error ? error.message : String(error)}`);
       }
       await clearConfig();
     }
@@ -462,7 +533,7 @@ async function login(args) {
 
 async function authenticatedRequest(pathname, options = {}) {
   const config = await readConfig();
-  if (!config?.token) throw new Error("Not logged in. Run `intellite login`.");
+  if (!config?.token) throw new Error(`Not logged in. Run \`${loginCommandHint()}\`.`);
   return request(pathname, {
     ...options,
     headers: {
@@ -474,7 +545,7 @@ async function authenticatedRequest(pathname, options = {}) {
 
 async function authenticatedFetch(pathname, options = {}) {
   const config = await readConfig();
-  if (!config?.token) throw new Error("Not logged in. Run `intellite login`.");
+  if (!config?.token) throw new Error(`Not logged in. Run \`${loginCommandHint()}\`.`);
   return fetch(`${DEFAULT_BASE_URL}${pathname}`, {
     ...options,
     headers: {
@@ -707,7 +778,7 @@ async function download(args) {
 }
 
 async function main() {
-  const [command, ...args] = process.argv.slice(2);
+  const [command, ...args] = extractGlobalOptions(process.argv.slice(2));
   if (!command || command === "help" || command === "--help" || command === "-h") {
     usage();
     return;
