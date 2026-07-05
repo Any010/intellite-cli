@@ -12,7 +12,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --check bin/intellite.mjs && node bin/intellite.mjs help",
+    "test": "node --check bin/intellite.mjs && node bin/intellite.mjs help && node --test scripts/test/",
     "security:secrets": "node scripts/secret-scan.mjs",
     "security:audit": "npm audit --omit=dev --audit-level=moderate",
     "security": "npm run security:secrets && npm run security:audit",
