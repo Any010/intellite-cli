@@ -50,6 +50,9 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_SKILLS = 20;
 const MAX_SKILL_FILES = 20;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
+const APP_GUIDANCE_VERSION = "2026-07-09.1";
+const APP_GUIDANCE_DIR = ".intellite";
+const APP_GUIDANCE_LOCK_FILE = "guidance-lock.json";
 const APP_API_PREFIX = "/api/intellite/apps/";
 const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
 const CAPABILITY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,159}$/;
@@ -82,6 +85,8 @@ Commands:
   app init [--output intellite.app.json]
   app validate [FILE]
   app conformance [FILE]
+  app refresh [FILE]
+  app doctor [FILE]
   app list
   app publish [FILE] --app-env staging
   app request-production-review [FILE]
@@ -558,6 +563,262 @@ function sampleAppManifest() {
     usageGuide: { path: "/api/usage-guide", format: "markdown" },
     lifecycle: { productionReviewRequired: true }
   };
+}
+
+function sha256Hex(value) {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function guidanceAppId(manifest) {
+  const appId = textValue(recordValue(manifest)?.appId);
+  return APP_ID_PATTERN.test(appId) ? appId : "your-app-id";
+}
+
+function guidanceTemplates(manifest) {
+  const appId = guidanceAppId(manifest);
+  return [
+    {
+      path: `${APP_GUIDANCE_DIR}/agent-guidance.md`,
+      content: `<!-- intellite-app-guidance-version: ${APP_GUIDANCE_VERSION} -->
+# Intellite App Agent Guidance
+
+This project-local file teaches AI coding agents how to work on this repository as an Intellite app. Keep it in the repo. Do not install it into global skill directories.
+
+## Boundary
+
+- Intellite is the control plane: authentication, organization selection, app entitlement, capability grants, audit, manifest registry, and signed app-call tickets.
+- This app owns the business data plane: app routes, database, documents, business rules, and user-facing workflows.
+- Agents and users should call this app through Intellite paths such as \`/api/intellite/apps/${appId}/...\`, not by calling the app origin directly.
+- Do not add global Codex skills for this app unless the user explicitly asks. Project-local guidance is the source of truth for development.
+
+## Local Development Flow
+
+1. Edit \`intellite.app.json\`.
+2. Run \`npx intellite app validate intellite.app.json\`.
+3. Run \`npx intellite app doctor intellite.app.json\`.
+4. Run \`npx intellite --env staging app publish intellite.app.json --app-env staging\` only after local checks pass.
+5. Request production with \`npx intellite --env staging app request-production-review intellite.app.json\`. Production activation is review-gated.
+
+## Manifest Rules
+
+- Use \`schemaVersion: 2\` for resources, actions, and events.
+- Keep capabilities narrow. A role should contain only the capabilities it needs.
+- Do not declare root catch-all proxy routes.
+- Do not declare broad write proxy routes for external apps.
+- Actions with \`risk: "external_send"\` or \`risk: "destructive"\` must use \`approval: "confirm"\` or \`approval: "admin"\`.
+- Missing skill signatures are acceptable locally. Intellite signs unsigned skill packages during publish and production review when platform signing is configured.
+
+## App Implementation Requirements
+
+- Implement a usage-guide endpoint and declare it in \`proxyRoutes\`.
+- Verify Intellite App Bridge signatures on proxied requests.
+- Enforce the capabilities supplied by Intellite on each request.
+- Reject stale timestamps and replayed request IDs.
+- Never use sample identities, test organization IDs, or display names as production authority.
+
+See \`.intellite/examples/usage-guide.md\` and \`.intellite/examples/proxy-signature-verification.md\`.
+`
+    },
+    {
+      path: `${APP_GUIDANCE_DIR}/examples/usage-guide.md`,
+      content: `<!-- intellite-app-guidance-version: ${APP_GUIDANCE_VERSION} -->
+# Usage Guide Endpoint Example
+
+Expose a read-only endpoint that returns concise instructions for agents operating this app through Intellite.
+
+Recommended route:
+
+\`\`\`text
+GET /api/usage-guide
+\`\`\`
+
+Recommended manifest route:
+
+\`\`\`json
+{
+  "routeId": "usage-guide-read",
+  "method": "READ",
+  "publicPathPattern": "^/usage-guide$",
+  "upstreamPathReplacement": "/api/usage-guide",
+  "capabilities": ["${appId}.read"]
+}
+\`\`\`
+
+The response should explain only supported app operations. It should not include secrets, app-origin credentials, customer-specific examples, or unsupported endpoints.
+`
+    },
+    {
+      path: `${APP_GUIDANCE_DIR}/examples/proxy-signature-verification.md`,
+      content: `<!-- intellite-app-guidance-version: ${APP_GUIDANCE_VERSION} -->
+# Proxy Signature Verification Example
+
+Every state-changing or data-bearing app route reached through Intellite must verify the signed App Bridge request before trusting the user, organization, or capabilities in the headers.
+
+Minimum checks:
+
+- Verify the HMAC-SHA256 signature using the app bridge secret configured for this app.
+- Include timestamp, method, path, app id, user id, email, organization id, capabilities, and request body hash in the signed payload according to the platform contract.
+- Reject stale timestamps.
+- Reject replayed request IDs with durable storage.
+- Check the declared capability before reading or writing app data.
+- Fail closed on missing headers, missing secret, signature mismatch, stale timestamp, replay, or insufficient capability.
+
+Do not bypass this by trusting app-origin sessions, display names, email text, or local development headers.
+`
+    }
+  ];
+}
+
+function guidanceLockPath(projectRoot) {
+  return path.join(projectRoot, APP_GUIDANCE_DIR, APP_GUIDANCE_LOCK_FILE);
+}
+
+function projectRelativePath(projectRoot, filePath) {
+  return path.relative(projectRoot, filePath).replace(/\\/g, "/");
+}
+
+function assertProjectLocalPath(projectRoot, relativePath) {
+  const target = path.resolve(projectRoot, relativePath);
+  const relative = path.relative(projectRoot, target);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to write outside the Intellite app project: ${relativePath}`);
+  }
+  return target;
+}
+
+async function readTextFileNoSymlink(filePath) {
+  await assertNotSymlink(filePath);
+  return fs.readFile(filePath, "utf8");
+}
+
+async function readGuidanceLock(projectRoot) {
+  try {
+    const lock = JSON.parse(await readTextFileNoSymlink(guidanceLockPath(projectRoot)));
+    return recordValue(lock) || {};
+  } catch {
+    return {};
+  }
+}
+
+function guidanceFileMap(lock) {
+  const files = recordValue(lock?.files) || {};
+  return Object.fromEntries(Object.entries(files).map(([key, value]) => [key, recordValue(value) || {}]));
+}
+
+async function writeGuidanceLock(projectRoot, lockFiles) {
+  const lock = {
+    managedBy: "intellite",
+    kind: "app-guidance",
+    version: APP_GUIDANCE_VERSION,
+    updatedAt: new Date().toISOString(),
+    files: lockFiles
+  };
+  const lockPath = guidanceLockPath(projectRoot);
+  await ensureDirectoryNoSymlink(path.dirname(lockPath), projectRoot);
+  await writeTextFileNoSymlink(lockPath, `${JSON.stringify(lock, null, 2)}\n`);
+}
+
+async function nextNewFilePath(filePath, content) {
+  for (let index = 0; index < 100; index += 1) {
+    const candidate = `${filePath}.new${index === 0 ? "" : `.${index}`}`;
+    try {
+      const existing = await readTextFileNoSymlink(candidate);
+      if (existing === content) return candidate;
+    } catch (error) {
+      if (error?.code === "ENOENT") return candidate;
+      throw error;
+    }
+  }
+  throw new Error(`Too many pending .new files for ${filePath}`);
+}
+
+async function writeAppGuidance(projectRoot, manifest, { refresh = false } = {}) {
+  const templates = guidanceTemplates(manifest);
+  const previousLock = await readGuidanceLock(projectRoot);
+  const previousFiles = guidanceFileMap(previousLock);
+  const nextLockFiles = {};
+  const results = [];
+
+  for (const template of templates) {
+    const filePath = assertProjectLocalPath(projectRoot, template.path);
+    const relativePath = projectRelativePath(projectRoot, filePath);
+    const desiredHash = sha256Hex(template.content);
+    const previousHash = textValue(previousFiles[relativePath]?.sha256);
+    await ensureDirectoryNoSymlink(path.dirname(filePath), projectRoot);
+
+    let existing = "";
+    let exists = false;
+    try {
+      existing = await readTextFileNoSymlink(filePath);
+      exists = true;
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+
+    if (!exists) {
+      await writeTextFileNoSymlink(filePath, template.content);
+      results.push({ path: relativePath, status: "created" });
+      nextLockFiles[relativePath] = { sha256: desiredHash };
+      continue;
+    }
+
+    const existingHash = sha256Hex(existing);
+    if (existingHash === desiredHash) {
+      results.push({ path: relativePath, status: "unchanged" });
+      nextLockFiles[relativePath] = { sha256: desiredHash };
+      continue;
+    }
+
+    if (refresh && previousHash && existingHash === previousHash) {
+      await writeTextFileNoSymlink(filePath, template.content);
+      results.push({ path: relativePath, status: "updated" });
+      nextLockFiles[relativePath] = { sha256: desiredHash };
+      continue;
+    }
+
+    const newPath = await nextNewFilePath(filePath, template.content);
+    await writeTextFileNoSymlink(newPath, template.content);
+    results.push({ path: relativePath, status: "conflict", newPath: projectRelativePath(projectRoot, newPath) });
+    nextLockFiles[relativePath] = previousHash ? { sha256: previousHash } : {};
+  }
+
+  await writeGuidanceLock(projectRoot, nextLockFiles);
+  return {
+    version: APP_GUIDANCE_VERSION,
+    dir: path.join(projectRoot, APP_GUIDANCE_DIR),
+    files: results
+  };
+}
+
+async function appGuidanceStatus(projectRoot, manifest) {
+  const templates = guidanceTemplates(manifest);
+  const lock = await readGuidanceLock(projectRoot);
+  const files = guidanceFileMap(lock);
+  const checks = [];
+  for (const template of templates) {
+    const filePath = assertProjectLocalPath(projectRoot, template.path);
+    const relativePath = projectRelativePath(projectRoot, filePath);
+    const desiredHash = sha256Hex(template.content);
+    let status = "missing";
+    let ok = false;
+    try {
+      const existing = await readTextFileNoSymlink(filePath);
+      const existingHash = sha256Hex(existing);
+      if (existingHash === desiredHash) {
+        status = "current";
+        ok = true;
+      } else if (textValue(files[relativePath]?.sha256) === existingHash) {
+        status = "outdated";
+      } else {
+        status = "modified";
+      }
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    checks.push({ name: `guidance:${relativePath}`, ok, status });
+  }
+  checks.push({ name: "guidance:lock-current", ok: textValue(lock.version) === APP_GUIDANCE_VERSION, status: textValue(lock.version) || "missing" });
+  return checks;
 }
 
 async function runProcess(command, args, { input = "", timeoutMs = 10000 } = {}) {
@@ -1307,6 +1568,7 @@ async function listSkills() {
 async function appInit(args) {
   const output = argValue(args, "--output", "intellite.app.json");
   const filePath = path.resolve(output);
+  const projectRoot = path.dirname(filePath);
   try {
     await fs.stat(filePath);
     throw new Error(`Refusing to overwrite existing file: ${filePath}`);
@@ -1314,8 +1576,10 @@ async function appInit(args) {
     if (error?.code !== "ENOENT") throw error;
   }
   await assertNotSymlink(filePath);
-  await fs.writeFile(filePath, JSON.stringify(sampleAppManifest(), null, 2), { mode: 0o644 });
-  console.log(JSON.stringify({ ok: true, filePath }, null, 2));
+  const manifest = sampleAppManifest();
+  await fs.writeFile(filePath, JSON.stringify(manifest, null, 2), { mode: 0o644 });
+  const guidance = await writeAppGuidance(projectRoot, manifest, { refresh: false });
+  console.log(JSON.stringify({ ok: true, filePath, guidance }, null, 2));
 }
 
 async function readAppManifestFile(args) {
@@ -1341,35 +1605,81 @@ async function appValidate(args) {
   if (!result.ok) process.exitCode = 1;
 }
 
+function appConformanceChecks(normalized) {
+  const checks = [];
+  if (!normalized) return checks;
+  const routeIds = new Set();
+  for (const route of normalized.proxyRoutes) {
+    const routeId = textValue(route.routeId);
+    checks.push({ name: `proxy-route:${routeId}`, ok: Boolean(routeId) && !routeIds.has(routeId) });
+    routeIds.add(routeId);
+  }
+  for (const environment of APP_ENVIRONMENTS) {
+    const config = recordValue(normalized.environments[environment]);
+    const urls = config ? [textValue(config.appBaseUrl), textValue(config.proxyBaseUrl), ...arrayText(config.oauthRedirectUris), ...arrayText(config.orgSelectRedirectUris)].filter(Boolean) : [];
+    checks.push({ name: `environment:${environment}`, ok: Boolean(config) && urls.length > 0 });
+    if (environment === "staging") checks.push({ name: "environment:staging-not-production", ok: !urls.some((url) => !url.includes("staging") && /intellite\.app|rpa-box\.com|pages\.dev/.test(url) && !url.includes("localhost")) });
+    if (environment === "production") checks.push({ name: "environment:production-not-staging", ok: !urls.some((url) => url.includes("staging") || url.includes("workers.dev")) });
+  }
+  checks.push({ name: "usage-guide-route", ok: normalized.proxyRoutes.some((route) => /usage-guide/.test(textValue(route.publicPathPattern))) });
+  checks.push({ name: "skill-package", ok: normalized.skills.length > 0 });
+  checks.push({ name: "production-review-required", ok: normalized.visibility !== "public" || normalized.lifecycle.productionReviewRequired !== false });
+  return checks;
+}
+
 async function appConformance(args) {
   const { filePath, manifest } = await readAppManifestFile(args);
   const result = validateAppManifestObject(manifest);
-  const checks = [];
-  const normalized = result.manifest;
-  if (normalized) {
-    const routeIds = new Set();
-    for (const route of normalized.proxyRoutes) {
-      const routeId = textValue(route.routeId);
-      checks.push({ name: `proxy-route:${routeId}`, ok: Boolean(routeId) && !routeIds.has(routeId) });
-      routeIds.add(routeId);
-    }
-    for (const environment of APP_ENVIRONMENTS) {
-      const config = recordValue(normalized.environments[environment]);
-      const urls = config ? [textValue(config.appBaseUrl), textValue(config.proxyBaseUrl), ...arrayText(config.oauthRedirectUris), ...arrayText(config.orgSelectRedirectUris)].filter(Boolean) : [];
-      checks.push({ name: `environment:${environment}`, ok: Boolean(config) && urls.length > 0 });
-      if (environment === "staging") checks.push({ name: "environment:staging-not-production", ok: !urls.some((url) => !url.includes("staging") && /intellite\.app|rpa-box\.com|pages\.dev/.test(url) && !url.includes("localhost")) });
-      if (environment === "production") checks.push({ name: "environment:production-not-staging", ok: !urls.some((url) => url.includes("staging") || url.includes("workers.dev")) });
-    }
-    checks.push({ name: "usage-guide-route", ok: normalized.proxyRoutes.some((route) => /usage-guide/.test(textValue(route.publicPathPattern))) });
-    checks.push({ name: "skill-package", ok: normalized.skills.length > 0 });
-    checks.push({ name: "production-review-required", ok: normalized.visibility !== "public" || normalized.lifecycle.productionReviewRequired !== false });
-  }
+  const checks = appConformanceChecks(result.manifest);
   const ok = result.ok && checks.every((check) => check.ok);
   console.log(JSON.stringify({
     ok,
     filePath,
     validation: { errors: result.errors, warnings: result.warnings },
     checks
+  }, null, 2));
+  if (!ok) process.exitCode = 1;
+}
+
+async function appRefresh(args) {
+  const { filePath, manifest } = await readAppManifestFile(args);
+  const result = validateAppManifestObject(manifest);
+  const guidance = await writeAppGuidance(path.dirname(filePath), result.manifest || manifest, { refresh: true });
+  console.log(JSON.stringify({
+    ok: true,
+    filePath,
+    validationOk: result.ok,
+    guidance,
+    validation: { errors: result.errors, warnings: result.warnings }
+  }, null, 2));
+}
+
+async function appDoctor(args) {
+  const { filePath, manifest } = await readAppManifestFile(args);
+  const result = validateAppManifestObject(manifest);
+  const conformanceChecks = appConformanceChecks(result.manifest);
+  const guidanceChecks = await appGuidanceStatus(path.dirname(filePath), result.manifest || manifest);
+  const manualChecks = [
+    {
+      name: "app-bridge-signature-verification",
+      status: "manual",
+      message: "Verify the app implementation checks Intellite App Bridge HMAC signatures, timestamp freshness, replay IDs, and capabilities."
+    }
+  ];
+  const checks = [
+    { name: "manifest-valid", ok: result.ok },
+    ...conformanceChecks,
+    ...guidanceChecks
+  ];
+  const ok = result.ok && checks.every((check) => check.ok);
+  console.log(JSON.stringify({
+    ok,
+    filePath,
+    appId: result.manifest?.appId || "",
+    version: result.manifest?.version || "",
+    validation: { errors: result.errors, warnings: result.warnings },
+    checks,
+    manualChecks
   }, null, 2));
   if (!ok) process.exitCode = 1;
 }
@@ -1426,6 +1736,8 @@ Commands:
   app init [--output intellite.app.json]
   app validate [FILE]
   app conformance [FILE]
+  app refresh [FILE]
+  app doctor [FILE]
   app list
   app publish [FILE] --app-env staging
   app request-production-review [FILE]
@@ -1435,6 +1747,8 @@ Commands:
   if (subcommand === "init") return appInit(rest);
   if (subcommand === "validate") return appValidate(rest);
   if (subcommand === "conformance") return appConformance(rest);
+  if (subcommand === "refresh") return appRefresh(rest);
+  if (subcommand === "doctor") return appDoctor(rest);
   if (subcommand === "list") return appList();
   if (subcommand === "publish") return appPublish(rest);
   if (subcommand === "request-production-review") return appRequestProductionReview(rest);

@@ -120,6 +120,8 @@ test("app help prints developer app commands", async () => {
     assert.match(result.stdout, /app init/);
     assert.match(result.stdout, /app validate/);
     assert.match(result.stdout, /app conformance/);
+    assert.match(result.stdout, /app refresh/);
+    assert.match(result.stdout, /app doctor/);
     assert.match(result.stdout, /app publish \[FILE\] --app-env staging/);
     assert.match(result.stdout, /app request-production-review \[FILE\]/);
   });
@@ -139,10 +141,58 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     assert.ok(Array.isArray(manifest.actions), "schema v2 sample should include actions");
     assert.ok(Array.isArray(manifest.events), "schema v2 sample should include events");
 
+    const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
+    const usageGuideExamplePath = path.join(home, ".intellite", "examples", "usage-guide.md");
+    const signatureExamplePath = path.join(home, ".intellite", "examples", "proxy-signature-verification.md");
+    const lockPath = path.join(home, ".intellite", "guidance-lock.json");
+    assert.match(await fs.readFile(guidancePath, "utf8"), /Intellite App Agent Guidance/);
+    assert.match(await fs.readFile(usageGuideExamplePath, "utf8"), /Usage Guide Endpoint Example/);
+    assert.match(await fs.readFile(signatureExamplePath, "utf8"), /Proxy Signature Verification Example/);
+    assert.equal(JSON.parse(await fs.readFile(lockPath, "utf8")).kind, "app-guidance");
+    assert.equal(await fileExists(path.join(home, ".codex")), false, "app init must not install global Codex skills");
+
     const validate = await runCli(["app", "validate", manifestPath], { home });
     assert.equal(validate.code, 0);
     const body = JSON.parse(validate.stdout);
     assert.equal(body.ok, true);
+
+    const doctor = await runCli(["app", "doctor", manifestPath], { home });
+    assert.equal(doctor.code, 0);
+    const doctorBody = JSON.parse(doctor.stdout);
+    assert.equal(doctorBody.ok, true);
+    assert.match(JSON.stringify(doctorBody.manualChecks), /App Bridge/);
+  });
+});
+
+test("app refresh does not overwrite user-edited guidance files", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "intellite.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+
+    const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
+    await fs.appendFile(guidancePath, "\nCustom project note.\n", "utf8");
+    await fs.rm(path.join(home, ".intellite", "guidance-lock.json"), { force: true });
+
+    const refresh = await runCli(["app", "refresh", manifestPath], { home });
+    assert.equal(refresh.code, 0);
+    const body = JSON.parse(refresh.stdout);
+    const guidanceResult = body.guidance.files.find((file) => file.path === ".intellite/agent-guidance.md");
+    assert.equal(guidanceResult.status, "conflict");
+    assert.match(await fs.readFile(guidancePath, "utf8"), /Custom project note/);
+    assert.match(await fs.readFile(path.join(home, guidanceResult.newPath), "utf8"), /Intellite App Agent Guidance/);
+
+    const secondRefresh = await runCli(["app", "refresh", manifestPath], { home });
+    assert.equal(secondRefresh.code, 0);
+    const secondBody = JSON.parse(secondRefresh.stdout);
+    assert.equal(secondBody.guidance.files.find((file) => file.path === ".intellite/agent-guidance.md").status, "conflict");
+    assert.match(await fs.readFile(guidancePath, "utf8"), /Custom project note/);
+
+    const doctor = await runCli(["app", "doctor", manifestPath], { home });
+    assert.equal(doctor.code, 1);
+    const doctorBody = JSON.parse(doctor.stdout);
+    assert.equal(doctorBody.ok, false);
+    assert.match(JSON.stringify(doctorBody.checks), /modified/);
   });
 });
 
