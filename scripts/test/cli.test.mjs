@@ -89,10 +89,39 @@ test("help command prints usage and exits 0", async () => {
     assert.equal(result.code, 0);
     assert.match(result.stdout, /Commands:/);
     assert.match(result.stdout, /login \[--name NAME\]/);
+    assert.match(result.stdout, /agent setup/);
+    assert.match(result.stdout, /agent context/);
     assert.match(result.stdout, /api METHOD PATH/);
-    assert.match(result.stdout, /download PATH --output FILE/);
+    assert.match(result.stdout, /download PATH \[--output FILE\]/);
+    assert.match(result.stdout, /app request-production-review \[FILE\]/);
     assert.match(result.stdout, /--env production\|staging/);
+    assert.match(result.stdout, /INTELLITE_AGENT_SKILLS_DIRS/);
     assert.match(result.stdout, /INTELLITE_TOKEN_STORE/);
+  });
+});
+
+test("agent help prints the supported local agent surface", async () => {
+  await withTempHome(async (home) => {
+    const result = await runCli(["agent", "--help"], { home });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /intellite agent/);
+    assert.match(result.stdout, /agent setup/);
+    assert.match(result.stdout, /agent context/);
+    assert.match(result.stdout, /agent api METHOD PATH/);
+    assert.match(result.stdout, /agent download PATH \[--output FILE\]/);
+  });
+});
+
+test("app help prints developer app commands", async () => {
+  await withTempHome(async (home) => {
+    const result = await runCli(["app", "--help"], { home });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /intellite app/);
+    assert.match(result.stdout, /app init/);
+    assert.match(result.stdout, /app validate/);
+    assert.match(result.stdout, /app conformance/);
+    assert.match(result.stdout, /app publish \[FILE\] --app-env staging/);
+    assert.match(result.stdout, /app request-production-review \[FILE\]/);
   });
 });
 
@@ -166,7 +195,19 @@ test("--env prod is an alias for production", async () => {
 
 // --- commands that require a token refuse to run when logged out -----------
 
-for (const command of [["status"], ["setup"], ["skills"], ["api", "GET", "/api/intellite/status"], ["download", "/api/intellite/file"]]) {
+for (const command of [
+  ["status"],
+  ["setup"],
+  ["skills"],
+  ["api", "GET", "/api/intellite/status"],
+  ["download", "/api/intellite/file"],
+  ["agent", "setup"],
+  ["agent", "status"],
+  ["agent", "skills"],
+  ["agent", "context"],
+  ["agent", "api", "GET", "/api/intellite/apps/example/workspace"],
+  ["agent", "download", "/api/intellite/apps/example/file"]
+]) {
   test(`${command[0]} without a token exits 1 with a login hint (${command.join(" ")})`, async () => {
     await withTempHome(async (home) => {
       const result = await runCli(command, { home });

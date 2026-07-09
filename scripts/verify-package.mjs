@@ -106,8 +106,12 @@ if (!cli.includes("macos-keychain")) fail("CLI must support macOS Keychain token
 if (!cli.includes("linux-secret-service")) fail("CLI must support Linux Secret Service token storage.");
 if (!cli.includes("INTELLITE_TOKEN_STORE=secure")) fail("CLI must document strict secure token storage mode.");
 if (!cli.includes("INTELLITE_STAGING_TOKEN")) fail("CLI must support staging token override.");
+if (!cli.includes("INTELLITE_AGENT_SKILLS_DIRS")) fail("CLI must support syncing additional local agent skill directories.");
+if (!cli.includes("INTELLITE_SYNC_CODEX_SKILLS")) fail("CLI must support explicit Codex skill sync control.");
 if (!cli.includes("config.staging.json")) fail("CLI must separate staging config from production config.");
 if (!cli.includes("skills-staging")) fail("CLI must separate staging skills from production skills.");
+if (!cli.includes("agent context")) fail("CLI must expose the current local agent context command.");
+if (!cli.includes("app request-production-review")) fail("CLI must expose the production review request command.");
 if (cli.includes("command === \"quote\"") || cli.includes("command === \"evidence\"")) fail("Base Intellite CLI must not expose app-specific commands.");
 if (cli.includes("quote calculate") || cli.includes("quote create") || cli.includes("evidence create")) fail("Base Intellite CLI help must stay app-neutral.");
 if (JSON.stringify(packageJson.keywords ?? []).toLowerCase().includes("quote")) fail("package keywords must stay app-neutral.");

@@ -37,6 +37,9 @@ let DEFAULT_BASE_URL = activeEnvironment.baseUrl;
 let CONFIG_FILE = path.join(CONFIG_DIR, activeEnvironment.configFileName);
 let SKILLS_DIR = process.env[activeEnvironment.skillsDirEnv] || path.join(CONFIG_DIR, activeEnvironment.skillsDirName);
 const MANAGED_SKILL_FILE = ".intellite-managed.json";
+const AGENT_SKILL_DIRS_ENV = "INTELLITE_AGENT_SKILLS_DIRS";
+const CODEX_SKILLS_DIR_ENV = "INTELLITE_CODEX_SKILLS_DIR";
+const CODEX_SYNC_ENV = "INTELLITE_SYNC_CODEX_SKILLS";
 let TOKEN_SERVICE = activeEnvironment.tokenService;
 let TOKEN_ACCOUNT = activeEnvironment.tokenAccount;
 let TOKEN_LABEL = activeEnvironment.tokenLabel;
@@ -47,18 +50,37 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_SKILLS = 20;
 const MAX_SKILL_FILES = 20;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
+const APP_API_PREFIX = "/api/intellite/apps/";
+const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
+const CAPABILITY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,159}$/;
+const ROLE_PATTERN = /^[a-z][a-z0-9_-]{0,39}$/;
+const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const APP_ENVIRONMENTS = ["local", "staging", "production"];
+const APP_ROUTE_METHODS = new Set(["*", "READ", "WRITE", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
 
 function usage() {
   console.log(`intellite
 
 Commands:
   login [--name NAME] [--permission APP_ID:CAPABILITY] [--force]
+  agent setup
+  agent status
+  agent skills
+  agent context
+  agent api METHOD PATH [--query KEY=VALUE] [--json JSON] [--body FILE]
+  agent download PATH [--output FILE]
   status
   setup
   skills
-  logout
   api METHOD PATH [--query KEY=VALUE] [--json JSON] [--body FILE]
-  download PATH --output FILE
+  download PATH [--output FILE]
+  app init [--output intellite.app.json]
+  app validate [FILE]
+  app conformance [FILE]
+  app list
+  app publish [FILE] --app-env staging
+  app request-production-review [FILE]
+  logout
 
 Options:
   --env production|staging  Target official Intellite environment
@@ -68,6 +90,8 @@ Environment:
   INTELLITE_SKILLS_DIR          Production skill sync directory
   INTELLITE_STAGING_TOKEN       Staging token override for ephemeral automation
   INTELLITE_STAGING_SKILLS_DIR  Staging skill sync directory
+  INTELLITE_AGENT_SKILLS_DIRS   Extra skill directories to sync, separated by ${path.delimiter}
+  INTELLITE_SYNC_CODEX_SKILLS   Set to 0 to skip ~/.codex/skills sync
   INTELLITE_TOKEN_STORE         auto, secure, or file
 `);
 }
@@ -182,6 +206,10 @@ function sha256Base64url(value) {
   return base64url(crypto.createHash("sha256").update(value).digest());
 }
 
+function appApiPath(pathname) {
+  return String(pathname || "").startsWith(APP_API_PREFIX);
+}
+
 function randomVerifier() {
   return crypto.randomBytes(48).toString("base64url");
 }
@@ -202,6 +230,205 @@ function parseJsonText(value, source) {
     const detail = error instanceof Error ? error.message : "invalid JSON";
     throw new Error(`${source} is not valid JSON: ${detail}`);
   }
+}
+
+function recordValue(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function textValue(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function arrayText(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.map((item) => textValue(item)).filter(Boolean)));
+}
+
+function isHttpUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.hostname === "localhost" || url.hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+function manifestIssue(pathname, message) {
+  return { path: pathname, message };
+}
+
+function normalizeManifest(value) {
+  const root = recordValue(value);
+  if (!root) return null;
+  return {
+    schemaVersion: root.schemaVersion,
+    appId: textValue(root.appId),
+    code: textValue(root.code),
+    name: textValue(root.name),
+    description: textValue(root.description),
+    version: textValue(root.version),
+    visibility: ["private", "organization", "public"].includes(root.visibility) ? root.visibility : "private",
+    capabilities: Array.isArray(root.capabilities) ? root.capabilities.map((item) => typeof item === "string" ? { id: item } : recordValue(item)).filter(Boolean) : [],
+    roles: Array.isArray(root.roles) ? root.roles.map(recordValue).filter(Boolean) : [],
+    environments: recordValue(root.environments) || {},
+    proxyRoutes: Array.isArray(root.proxyRoutes) ? root.proxyRoutes.map(recordValue).filter(Boolean) : [],
+    skills: Array.isArray(root.skills) ? root.skills.map(recordValue).filter(Boolean) : [],
+    usageGuide: recordValue(root.usageGuide) || {},
+    lifecycle: recordValue(root.lifecycle) || {}
+  };
+}
+
+function validateAppManifestObject(value) {
+  const manifest = normalizeManifest(value);
+  const errors = [];
+  const warnings = [];
+  if (!manifest) return { ok: false, errors: [manifestIssue("$", "Manifest must be a JSON object.")], warnings: [] };
+  if (manifest.schemaVersion !== 1) errors.push(manifestIssue("$.schemaVersion", "schemaVersion must be 1."));
+  if (!APP_ID_PATTERN.test(manifest.appId)) errors.push(manifestIssue("$.appId", "appId is invalid."));
+  if (!manifest.name) errors.push(manifestIssue("$.name", "name is required."));
+  if (!manifest.version) errors.push(manifestIssue("$.version", "version is required."));
+
+  const declaredCapabilities = new Set();
+  manifest.capabilities.forEach((capability, index) => {
+    const id = textValue(capability?.id);
+    if (!CAPABILITY_PATTERN.test(id)) errors.push(manifestIssue(`$.capabilities[${index}].id`, "Capability id is invalid."));
+    else declaredCapabilities.add(id);
+  });
+  if (declaredCapabilities.size === 0) errors.push(manifestIssue("$.capabilities", "At least one capability is required."));
+
+  const defaultRoles = [];
+  manifest.roles.forEach((role, index) => {
+    const id = textValue(role.id);
+    const capabilities = arrayText(role.capabilities);
+    if (!ROLE_PATTERN.test(id)) errors.push(manifestIssue(`$.roles[${index}].id`, "Role id is invalid."));
+    if (role.default === true) defaultRoles.push(id);
+    if (capabilities.length === 0) errors.push(manifestIssue(`$.roles[${index}].capabilities`, "Role must declare capabilities."));
+    for (const capability of capabilities) {
+      if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.roles[${index}].capabilities`, `Undeclared capability: ${capability}`));
+    }
+  });
+  if (manifest.roles.length === 0) errors.push(manifestIssue("$.roles", "At least one role is required."));
+  if (defaultRoles.length !== 1) errors.push(manifestIssue("$.roles", "Exactly one role must set default: true."));
+
+  for (const environment of APP_ENVIRONMENTS) {
+    const config = recordValue(manifest.environments[environment]);
+    if (!config) {
+      errors.push(manifestIssue(`$.environments.${environment}`, `${environment} environment is required.`));
+      continue;
+    }
+    const appBaseUrl = textValue(config.appBaseUrl);
+    const proxyBaseUrl = textValue(config.proxyBaseUrl);
+    if (!appBaseUrl && !proxyBaseUrl) errors.push(manifestIssue(`$.environments.${environment}`, "appBaseUrl or proxyBaseUrl is required."));
+    for (const [key, url] of Object.entries({ appBaseUrl, proxyBaseUrl })) {
+      if (url && !isHttpUrl(url)) errors.push(manifestIssue(`$.environments.${environment}.${key}`, `${key} must be https or localhost.`));
+    }
+    for (const [key, values] of Object.entries({ oauthRedirectUris: arrayText(config.oauthRedirectUris), orgSelectRedirectUris: arrayText(config.orgSelectRedirectUris) })) {
+      values.forEach((redirectUri, index) => {
+        if (!isHttpUrl(redirectUri)) errors.push(manifestIssue(`$.environments.${environment}.${key}[${index}]`, "Redirect URI must be https or localhost."));
+        if (redirectUri.includes("*")) errors.push(manifestIssue(`$.environments.${environment}.${key}[${index}]`, "Redirect URI must not contain wildcards."));
+      });
+    }
+  }
+
+  manifest.proxyRoutes.forEach((route, index) => {
+    const method = textValue(route.method || "*").toUpperCase();
+    const pattern = textValue(route.publicPathPattern);
+    const replacement = textValue(route.upstreamPathReplacement);
+    const capabilities = arrayText(route.capabilities);
+    if (!/^[a-z0-9][a-z0-9_-]{0,79}$/.test(textValue(route.routeId))) errors.push(manifestIssue(`$.proxyRoutes[${index}].routeId`, "routeId is invalid."));
+    if (!APP_ROUTE_METHODS.has(method)) errors.push(manifestIssue(`$.proxyRoutes[${index}].method`, "method is invalid."));
+    if (!pattern.startsWith("^/")) errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "publicPathPattern must be anchored under /."));
+    try {
+      new RegExp(pattern);
+    } catch {
+      errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "publicPathPattern is not valid regex."));
+    }
+    if (!replacement.startsWith("/") && replacement !== "$&") errors.push(manifestIssue(`$.proxyRoutes[${index}].upstreamPathReplacement`, "upstreamPathReplacement must be a path replacement."));
+    if (/^https?:\/\//i.test(replacement)) errors.push(manifestIssue(`$.proxyRoutes[${index}].upstreamPathReplacement`, "upstreamPathReplacement must not include an origin."));
+    if (capabilities.length === 0) errors.push(manifestIssue(`$.proxyRoutes[${index}].capabilities`, "Route must require capabilities."));
+    for (const capability of capabilities) {
+      if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.proxyRoutes[${index}].capabilities`, `Undeclared capability: ${capability}`));
+    }
+  });
+
+  manifest.skills.forEach((skill, index) => {
+    if (!SKILL_NAME_PATTERN.test(textValue(skill.name))) errors.push(manifestIssue(`$.skills[${index}].name`, "Skill name is invalid."));
+    for (const capability of arrayText(skill.requiredCapabilities)) {
+      if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.skills[${index}].requiredCapabilities`, `Undeclared capability: ${capability}`));
+    }
+  });
+  if (!manifest.proxyRoutes.some((route) => /usage-guide/.test(textValue(route.publicPathPattern)))) warnings.push(manifestIssue("$.proxyRoutes", "No usage-guide proxy route is declared."));
+  if (manifest.skills.length === 0) warnings.push(manifestIssue("$.skills", "No skill package is declared."));
+  return { ok: errors.length === 0, errors, warnings, manifest };
+}
+
+function sampleAppManifest() {
+  return {
+    schemaVersion: 1,
+    appId: "example-workflow",
+    name: "Example Workflow",
+    description: "Example Intellite-connected business app.",
+    version: "0.1.0",
+    visibility: "private",
+    capabilities: [
+      { id: "example-workflow.read", label: "Read" },
+      { id: "example-workflow.write", label: "Write" },
+      { id: "example-workflow.admin", label: "Admin" }
+    ],
+    roles: [
+      { id: "viewer", label: "Viewer", capabilities: ["example-workflow.read"], default: true },
+      { id: "member", label: "Member", capabilities: ["example-workflow.read", "example-workflow.write"] },
+      { id: "admin", label: "Admin", capabilities: ["example-workflow.read", "example-workflow.write", "example-workflow.admin"] }
+    ],
+    environments: {
+      local: {
+        appBaseUrl: "http://localhost:5173",
+        proxyBaseUrl: "http://localhost:8788",
+        oauthRedirectUris: ["http://localhost:5173/api/auth/intellite/callback"]
+      },
+      staging: {
+        appBaseUrl: "https://staging.example-app.example.com",
+        proxyBaseUrl: "https://staging.example-app.example.com",
+        oauthRedirectUris: ["https://staging.example-app.example.com/api/auth/intellite/callback"]
+      },
+      production: {
+        appBaseUrl: "https://example-app.example.com",
+        proxyBaseUrl: "https://example-app.example.com",
+        oauthRedirectUris: ["https://example-app.example.com/api/auth/intellite/callback"]
+      }
+    },
+    proxyRoutes: [
+      {
+        routeId: "usage-guide-read",
+        method: "READ",
+        publicPathPattern: "^/usage-guide$",
+        upstreamPathReplacement: "/api/usage-guide",
+        capabilities: ["example-workflow.read"],
+        sort: 10
+      },
+      {
+        routeId: "standard-api-read",
+        method: "READ",
+        publicPathPattern: "^/v1/.*",
+        upstreamPathReplacement: "/api$&",
+        capabilities: ["example-workflow.read"],
+        sort: 100
+      }
+    ],
+    skills: [
+      {
+        name: "example-workflow",
+        displayName: "Example Workflow App",
+        description: "Operate Example Workflow through the Intellite local agent path.",
+        version: "0.1.0",
+        requiredCapabilities: ["example-workflow.read"],
+        files: [{ path: "SKILL.md", content: "# Example Workflow App\n\nUse `intellite agent api` with `/api/intellite/apps/example-workflow/...` paths only.\n" }]
+      }
+    ],
+    usageGuide: { path: "/api/usage-guide", format: "markdown" },
+    lifecycle: { productionReviewRequired: true }
+  };
 }
 
 async function runProcess(command, args, { input = "", timeoutMs = 10000 } = {}) {
@@ -419,6 +646,66 @@ function localSkillsDir() {
   return path.resolve(SKILLS_DIR);
 }
 
+function codexSkillsDir() {
+  const explicit = process.env[CODEX_SKILLS_DIR_ENV];
+  if (explicit) return path.resolve(explicit);
+  const codexHome = process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+  return path.resolve(codexHome, "skills");
+}
+
+function extraAgentSkillDirs() {
+  const value = process.env[AGENT_SKILL_DIRS_ENV] || "";
+  return value
+    .split(path.delimiter)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => path.resolve(item));
+}
+
+function skillSyncTargets() {
+  const targets = [
+    { label: "intellite", dir: localSkillsDir(), codex: false }
+  ];
+  if (process.env[CODEX_SYNC_ENV] !== "0") {
+    targets.push({ label: "codex", dir: codexSkillsDir(), codex: true });
+  }
+  for (const dir of extraAgentSkillDirs()) {
+    targets.push({ label: "extra", dir, codex: true });
+  }
+  const seen = new Set();
+  return targets.filter((target) => {
+    const key = path.resolve(target.dir).toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function yamlQuoted(value) {
+  return JSON.stringify(String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n"));
+}
+
+function hasYamlFrontmatter(content) {
+  return String(content || "").trimStart().startsWith("---\n") || String(content || "").trimStart().startsWith("---\r\n");
+}
+
+function codexSkillFileContent(skill, file) {
+  const content = String(file.content || "");
+  if (file.path !== "SKILL.md" || hasYamlFrontmatter(content)) return content;
+  const description = skill.description || skill.displayName || skill.name;
+  return [
+    "---",
+    `name: ${yamlQuoted(skill.name)}`,
+    `description: ${yamlQuoted(description)}`,
+    "metadata:",
+    `  version: ${yamlQuoted(skill.version || "")}`,
+    '  source: "intellite"',
+    "---",
+    "",
+    content
+  ].join("\n");
+}
+
 async function request(pathname, options = {}) {
   const response = await fetch(`${DEFAULT_BASE_URL}${pathname}`, options);
   const contentType = response.headers.get("content-type") || "";
@@ -565,9 +852,150 @@ async function revokeToken(token) {
   });
 }
 
+function assertAppTicketUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || ""));
+  } catch {
+    throw new Error("Intellite returned an invalid app URL.");
+  }
+  const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) {
+    throw new Error("Intellite returned an unsafe app URL.");
+  }
+  return url.toString();
+}
+
+function appTicketHeaders(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Intellite returned invalid app call headers.");
+  }
+  const headers = new Headers();
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== "string") continue;
+    if (!/^x-intellite-[a-z0-9-]+$/i.test(key)) continue;
+    if ([...item].some((char) => char.charCodeAt(0) > 255)) continue;
+    headers.set(key, item);
+  }
+  if (!headers.get("X-Intellite-Proxy-Signature") || !headers.get("X-Intellite-Proxy-Timestamp")) {
+    throw new Error("Intellite did not return signed app call headers.");
+  }
+  return headers;
+}
+
+async function appDirectFetch(pathname, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  const rawBody = options.body === undefined || options.body === null ? "" : options.body;
+  const bodySha256 = sha256Base64url(rawBody);
+  const { body: ticket } = await authenticatedRequest("/api/intellite/app-call-ticket", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method, path: pathname, bodySha256 })
+  });
+  if (!ticket || typeof ticket !== "object") throw new Error("Intellite did not return an app call ticket.");
+  const url = assertAppTicketUrl(ticket.url);
+  const headers = appTicketHeaders(ticket.headers);
+  const sourceHeaders = new Headers(options.headers || {});
+  const contentType = sourceHeaders.get("Content-Type");
+  if (contentType) headers.set("Content-Type", contentType);
+  const accept = sourceHeaders.get("Accept");
+  if (accept) headers.set("Accept", accept);
+  const idempotencyKey = sourceHeaders.get("Idempotency-Key");
+  if (idempotencyKey) headers.set("Idempotency-Key", idempotencyKey);
+  return fetch(url, {
+    method,
+    headers,
+    body: method === "GET" || method === "HEAD" ? undefined : rawBody,
+    redirect: "manual"
+  });
+}
+
+async function appDirectRequest(pathname, options = {}) {
+  const response = await appDirectFetch(pathname, options);
+  const contentType = response.headers.get("content-type") || "";
+  const body = contentType.includes("application/json") ? await response.json().catch(() => ({})) : await response.text();
+  if (!response.ok) {
+    const message = errorMessageFromBody(body, response.status);
+    const error = new Error(String(message));
+    error.status = response.status;
+    error.body = body;
+    throw error;
+  }
+  return { response, body };
+}
+
 async function status() {
   const { body } = await authenticatedRequest("/api/intellite/status");
   console.log(JSON.stringify(body, null, 2));
+}
+
+function agentHelp() {
+  console.log(`intellite agent
+
+Local AI agent commands:
+  agent setup
+  agent status
+  agent skills
+  agent context
+  agent api METHOD PATH [--query KEY=VALUE] [--json JSON] [--body FILE]
+  agent download PATH [--output FILE]
+
+Use these commands from a local AI assistant or automation. Keep using
+/api/intellite/apps/<app-id>/... paths; the CLI exchanges them for signed direct
+app calls and writes files locally with agent download. The local agent path is
+the supported end-user integration surface.
+`);
+}
+
+async function agentStatus() {
+  const { body } = await authenticatedRequest("/api/intellite/status");
+  console.log(JSON.stringify({
+    mode: "local-agent",
+    environment: activeEnvironment.name,
+    baseUrl: DEFAULT_BASE_URL,
+    skillsDir: localSkillsDir(),
+    syncedSkillDirs: skillSyncTargets().map((target) => ({ label: target.label, dir: target.dir, codex: target.codex })),
+    status: body
+  }, null, 2));
+}
+
+async function agentContext() {
+  const [{ body }, skills] = await Promise.all([
+    authenticatedRequest("/api/intellite/status"),
+    fetchSkills()
+  ]);
+  console.log(JSON.stringify({
+    mode: "local-agent",
+    environment: activeEnvironment.name,
+    baseUrl: DEFAULT_BASE_URL,
+    skillsDir: localSkillsDir(),
+    syncedSkillDirs: skillSyncTargets().map((target) => ({ label: target.label, dir: target.dir, codex: target.codex })),
+    commands: {
+      setup: "intellite agent setup",
+      status: "intellite agent status",
+      skills: "intellite agent skills",
+      api: "intellite agent api METHOD /api/intellite/apps/<app-id>/...",
+      download: "intellite agent download /api/intellite/apps/<app-id>/path/to/file --output file.ext"
+    },
+    rules: [
+      "Use synced local skills first for app-specific behavior.",
+      "If an app call fails unexpectedly, run agent setup or agent skills, read the app usage guide, and retry once.",
+      "Call app APIs only through /api/intellite/apps/<app-id>/...",
+      "Use agent download for files that must appear on this machine.",
+      "Do not call app origins directly or ask the user for passwords, tokens, Basic Auth values, invite URLs, or reset URLs."
+    ],
+    status: body,
+    skills: skills.map((skill) => ({
+      name: skill.name,
+      displayName: skill.displayName,
+      description: skill.description,
+      version: skill.version,
+      appId: skill.appId,
+      capabilities: skill.capabilities,
+      requiredPermissions: skill.requiredPermissions,
+      grantedPermissions: skill.grantedPermissions
+    }))
+  }, null, 2));
 }
 
 async function fetchSkills() {
@@ -622,8 +1050,7 @@ function normalizePermissionList(value) {
     .filter(Boolean);
 }
 
-async function managedSkillDirectories() {
-  const root = localSkillsDir();
+async function managedSkillDirectories(root) {
   let entries = [];
   try {
     entries = await fs.readdir(root, { withFileTypes: true });
@@ -644,9 +1071,7 @@ async function managedSkillDirectories() {
   return managed;
 }
 
-async function setupSkills({ quiet = false } = {}) {
-  const skills = await fetchSkills();
-  const root = localSkillsDir();
+async function syncSkillsToRoot(skills, root, options = {}) {
   await fs.mkdir(root, { recursive: true });
   const current = new Set(skills.map((skill) => skill.name));
 
@@ -661,7 +1086,7 @@ async function setupSkills({ quiet = false } = {}) {
         throw new Error(`Invalid resolved skill file path from Intellite: ${file.path}`);
       }
       await ensureDirectoryNoSymlink(path.dirname(target), resolvedSkillDir);
-      await writeTextFileNoSymlink(target, file.content);
+      await writeTextFileNoSymlink(target, options.codex ? codexSkillFileContent(skill, file) : file.content);
     }
     await writeTextFileNoSymlink(
       path.join(skillDir, MANAGED_SKILL_FILE),
@@ -669,13 +1094,23 @@ async function setupSkills({ quiet = false } = {}) {
     );
   }
 
-  for (const previous of await managedSkillDirectories()) {
+  for (const previous of await managedSkillDirectories(root)) {
     if (!current.has(previous.name)) await fs.rm(previous.dir, { recursive: true, force: true });
+  }
+}
+
+async function setupSkills({ quiet = false } = {}) {
+  const skills = await fetchSkills();
+  const targets = skillSyncTargets();
+
+  for (const target of targets) {
+    await syncSkillsToRoot(skills, target.dir, { codex: target.codex });
   }
 
   if (!quiet) {
     console.log(JSON.stringify({
-      skillsDir: root,
+      skillsDir: localSkillsDir(),
+      syncedSkillDirs: targets.map((target) => ({ label: target.label, dir: target.dir, codex: target.codex })),
       installed: skills.map((skill) => ({
         name: skill.name,
         version: skill.version,
@@ -700,6 +1135,158 @@ async function listSkills() {
   })), null, 2));
 }
 
+async function appInit(args) {
+  const output = argValue(args, "--output", "intellite.app.json");
+  const filePath = path.resolve(output);
+  try {
+    await fs.stat(filePath);
+    throw new Error(`Refusing to overwrite existing file: ${filePath}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  await assertNotSymlink(filePath);
+  await fs.writeFile(filePath, JSON.stringify(sampleAppManifest(), null, 2), { mode: 0o644 });
+  console.log(JSON.stringify({ ok: true, filePath }, null, 2));
+}
+
+async function readAppManifestFile(args) {
+  const filePath = path.resolve(args[0] || "intellite.app.json");
+  return { filePath, manifest: await readJsonFile(filePath) };
+}
+
+function printManifestValidation(result, filePath) {
+  console.log(JSON.stringify({
+    ok: result.ok,
+    filePath,
+    appId: result.manifest?.appId || "",
+    version: result.manifest?.version || "",
+    errors: result.errors,
+    warnings: result.warnings
+  }, null, 2));
+}
+
+async function appValidate(args) {
+  const { filePath, manifest } = await readAppManifestFile(args);
+  const result = validateAppManifestObject(manifest);
+  printManifestValidation(result, filePath);
+  if (!result.ok) process.exitCode = 1;
+}
+
+async function appConformance(args) {
+  const { filePath, manifest } = await readAppManifestFile(args);
+  const result = validateAppManifestObject(manifest);
+  const checks = [];
+  const normalized = result.manifest;
+  if (normalized) {
+    const routeIds = new Set();
+    for (const route of normalized.proxyRoutes) {
+      const routeId = textValue(route.routeId);
+      checks.push({ name: `proxy-route:${routeId}`, ok: Boolean(routeId) && !routeIds.has(routeId) });
+      routeIds.add(routeId);
+    }
+    for (const environment of APP_ENVIRONMENTS) {
+      const config = recordValue(normalized.environments[environment]);
+      const urls = config ? [textValue(config.appBaseUrl), textValue(config.proxyBaseUrl), ...arrayText(config.oauthRedirectUris), ...arrayText(config.orgSelectRedirectUris)].filter(Boolean) : [];
+      checks.push({ name: `environment:${environment}`, ok: Boolean(config) && urls.length > 0 });
+      if (environment === "staging") checks.push({ name: "environment:staging-not-production", ok: !urls.some((url) => !url.includes("staging") && /intellite\.app|rpa-box\.com|pages\.dev/.test(url) && !url.includes("localhost")) });
+      if (environment === "production") checks.push({ name: "environment:production-not-staging", ok: !urls.some((url) => url.includes("staging") || url.includes("workers.dev")) });
+    }
+    checks.push({ name: "usage-guide-route", ok: normalized.proxyRoutes.some((route) => /usage-guide/.test(textValue(route.publicPathPattern))) });
+    checks.push({ name: "skill-package", ok: normalized.skills.length > 0 });
+    checks.push({ name: "production-review-required", ok: normalized.visibility !== "public" || normalized.lifecycle.productionReviewRequired !== false });
+  }
+  const ok = result.ok && checks.every((check) => check.ok);
+  console.log(JSON.stringify({
+    ok,
+    filePath,
+    validation: { errors: result.errors, warnings: result.warnings },
+    checks
+  }, null, 2));
+  if (!ok) process.exitCode = 1;
+}
+
+async function appPublish(args) {
+  const clean = withoutOptions(args, ["--app-env"]);
+  const targetEnvironment = argValue(args, "--app-env", "staging").trim().toLowerCase();
+  if (!APP_ENVIRONMENTS.includes(targetEnvironment)) throw new Error("--app-env must be local, staging, or production.");
+  const { filePath, manifest } = await readAppManifestFile(clean);
+  const result = validateAppManifestObject(manifest);
+  if (!result.ok) {
+    printManifestValidation(result, filePath);
+    process.exitCode = 1;
+    return;
+  }
+  if (targetEnvironment === "production") {
+    throw new Error("Production app publication requires Intellite review and is not published by this CLI command yet.");
+  }
+  const { body } = await authenticatedRequest(`/api/organization/developer/apps/manifest/publish?env=${encodeURIComponent(targetEnvironment)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ environment: targetEnvironment, manifest })
+  });
+  console.log(JSON.stringify({ filePath, ...body }, null, 2));
+}
+
+async function appRequestProductionReview(args) {
+  const { filePath, manifest } = await readAppManifestFile(args);
+  const result = validateAppManifestObject(manifest);
+  if (!result.ok) {
+    printManifestValidation(result, filePath);
+    process.exitCode = 1;
+    return;
+  }
+  const { body } = await authenticatedRequest("/api/organization/developer/apps/manifest/request-production-review", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ manifest })
+  });
+  console.log(JSON.stringify({ filePath, ...body }, null, 2));
+}
+
+async function appList() {
+  const { body } = await authenticatedRequest("/api/organization/developer/apps");
+  console.log(JSON.stringify(body, null, 2));
+}
+
+async function appCommand(args) {
+  const [subcommand, ...rest] = args;
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    console.log(`intellite app
+
+Commands:
+  app init [--output intellite.app.json]
+  app validate [FILE]
+  app conformance [FILE]
+  app list
+  app publish [FILE] --app-env staging
+  app request-production-review [FILE]
+`);
+    return;
+  }
+  if (subcommand === "init") return appInit(rest);
+  if (subcommand === "validate") return appValidate(rest);
+  if (subcommand === "conformance") return appConformance(rest);
+  if (subcommand === "list") return appList();
+  if (subcommand === "publish") return appPublish(rest);
+  if (subcommand === "request-production-review") return appRequestProductionReview(rest);
+  throw new Error(`Unknown app command: ${subcommand}`);
+}
+
+async function agentCommand(args) {
+  const [subcommand, ...rest] = args;
+  if (!subcommand || subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    agentHelp();
+    return;
+  }
+  if (subcommand === "setup" || subcommand === "sync") return setupSkills();
+  if (subcommand === "status") return agentStatus();
+  if (subcommand === "skills") return listSkills();
+  if (subcommand === "context") return agentContext();
+  if (subcommand === "api") return api(rest);
+  if (subcommand === "download") return download(rest);
+  throw new Error(`Unknown agent command: ${subcommand}`);
+}
+
 async function logout() {
   const config = await readConfig();
   if (config?.token) {
@@ -722,7 +1309,8 @@ async function api(args) {
     : bodyFile
       ? JSON.stringify(await readJsonFile(bodyFile))
       : undefined;
-  const { body } = await authenticatedRequest(pathname, {
+  const transport = appApiPath(pathname) ? appDirectRequest : authenticatedRequest;
+  const { body } = await transport(pathname, {
     method,
     headers: hasBody ? { "Content-Type": "application/json" } : {},
     body: payload
@@ -750,7 +1338,7 @@ async function download(args) {
   const pathname = args[0] || "";
   if (!pathname || !pathname.startsWith("/")) throw new Error("Usage: intellite download PATH --output FILE");
   const outputArg = argValue(args, "--output", "");
-  const response = await authenticatedFetch(pathname);
+  const response = appApiPath(pathname) ? await appDirectFetch(pathname) : await authenticatedFetch(pathname);
   if (!response.ok) {
     const contentType = response.headers.get("content-type") || "";
     const body = contentType.includes("application/json") ? await response.json().catch(() => ({})) : await response.text();
@@ -787,6 +1375,8 @@ async function main() {
   if (command === "status") return status();
   if (command === "setup") return setupSkills();
   if (command === "skills") return listSkills();
+  if (command === "agent") return agentCommand(args);
+  if (command === "app") return appCommand(args);
   if (command === "logout") return logout();
   if (command === "api") return api(args);
   if (command === "download") return download(args);

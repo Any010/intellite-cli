@@ -59,7 +59,7 @@ try {
     ? ["/d", "/s", "/c", "npx", "--prefix", prefix, "--yes", `intellite@${version}`, "help"]
     : ["--prefix", prefix, "--yes", `intellite@${version}`, "help"];
   const { stdout } = await verifyWithRetry(command, args);
-  if (!stdout.includes("intellite") || !stdout.includes("INTELLITE_TOKEN_STORE") || !stdout.includes("--env production|staging")) {
+  if (!stdout.includes("intellite") || !stdout.includes("agent context") || !stdout.includes("app request-production-review") || !stdout.includes("INTELLITE_TOKEN_STORE") || !stdout.includes("--env production|staging")) {
     throw new Error("Published CLI help output did not match the expected Intellite CLI.");
   }
   const stagingArgs = process.platform === "win32"
