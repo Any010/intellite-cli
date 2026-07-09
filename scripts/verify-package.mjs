@@ -118,6 +118,8 @@ if (!cli.includes("schemaVersion: 2")) fail("CLI app init must scaffold the curr
 if (!cli.includes("APP_GUIDANCE_VERSION")) fail("CLI must version project-local app guidance.");
 if (!cli.includes("guidance-lock.json")) fail("CLI must track generated guidance hashes.");
 if (!cli.includes("Do not install it into global skill directories")) fail("CLI guidance must be project-local, not global skill sync.");
+if (!cli.includes("unsafeProxyPathPatternReason")) fail("CLI must mirror server-side proxy regex safety checks.");
+if (!cli.includes("project-values:replace-sample-app-id")) fail("CLI doctor must reject unedited app init sample values.");
 if (!cli.includes("manifest.resources")) fail("CLI manifest validator must support schema v2 resources.");
 if (!cli.includes("manifest.actions")) fail("CLI manifest validator must support schema v2 actions.");
 if (!cli.includes("manifest.events")) fail("CLI manifest validator must support schema v2 events.");

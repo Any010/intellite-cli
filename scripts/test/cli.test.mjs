@@ -156,6 +156,22 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const body = JSON.parse(validate.stdout);
     assert.equal(body.ok, true);
 
+    const sampleDoctor = await runCli(["app", "doctor", manifestPath], { home });
+    assert.equal(sampleDoctor.code, 1);
+    const sampleDoctorBody = JSON.parse(sampleDoctor.stdout);
+    assert.equal(sampleDoctorBody.ok, false);
+    assert.match(JSON.stringify(sampleDoctorBody.checks), /replace-sample-app-id/);
+
+    const readyManifest = JSON.parse(
+      JSON.stringify(manifest)
+        .replaceAll("example-workflow", "acme-workflow")
+        .replaceAll("Example Workflow", "Acme Workflow")
+        .replaceAll("staging.example-app.example.com", "staging.acme.example.net")
+        .replaceAll("example-app.example.com", "acme.example.net")
+    );
+    await fs.writeFile(manifestPath, JSON.stringify(readyManifest, null, 2), "utf8");
+    const refresh = await runCli(["app", "refresh", manifestPath], { home });
+    assert.equal(refresh.code, 0);
     const doctor = await runCli(["app", "doctor", manifestPath], { home });
     assert.equal(doctor.code, 0);
     const doctorBody = JSON.parse(doctor.stdout);
@@ -227,6 +243,23 @@ test("app validate rejects root catch-all routes", async () => {
     const body = JSON.parse(validate.stdout);
     assert.equal(body.ok, false);
     assert.match(JSON.stringify(body.errors), /root catch-all/);
+  });
+});
+
+test("app validate rejects proxy route patterns that the server rejects for regex safety", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "unsafe-regex.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    manifest.proxyRoutes[0].publicPathPattern = "^/(a+)+$";
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+    const validate = await runCli(["app", "validate", manifestPath], { home });
+    assert.equal(validate.code, 1);
+    const body = JSON.parse(validate.stdout);
+    assert.equal(body.ok, false);
+    assert.match(JSON.stringify(body.errors), /repetition quantifier/);
   });
 });
 

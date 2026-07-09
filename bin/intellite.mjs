@@ -50,7 +50,7 @@ const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_SKILLS = 20;
 const MAX_SKILL_FILES = 20;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
-const APP_GUIDANCE_VERSION = "2026-07-09.1";
+const APP_GUIDANCE_VERSION = "2026-07-09.2";
 const APP_GUIDANCE_DIR = ".intellite";
 const APP_GUIDANCE_LOCK_FILE = "guidance-lock.json";
 const APP_API_PREFIX = "/api/intellite/apps/";
@@ -296,6 +296,55 @@ function routeLooksBroadWrite(pattern, method) {
   return WRITE_ROUTE_METHODS.has(method) && /(?:\.\*|\.\+|\[\^\/\]\*(?:\)|$)|\(\?:\/\.\*\)\?)/.test(pattern);
 }
 
+function unsafeProxyPathPatternReason(pattern) {
+  if (pattern.length > 256) return "pattern is longer than 256 characters";
+  if (!pattern.startsWith("^")) return "pattern must be anchored with ^";
+  if (/\\[1-9]/.test(pattern)) return "backreferences are not allowed";
+  if (/\(\?<[=!]/.test(pattern)) return "lookbehind groups are not allowed";
+  const groupStack = [];
+  let inClass = false;
+  let closedGroup = null;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index];
+    if (char === "\\") {
+      index += 1;
+      closedGroup = null;
+      continue;
+    }
+    if (inClass) {
+      if (char === "]") inClass = false;
+      continue;
+    }
+    if (char === "[") {
+      inClass = true;
+      closedGroup = null;
+      continue;
+    }
+    if (char === "(") {
+      groupStack.push({ hasQuantifier: false, hasAlternation: false });
+      closedGroup = null;
+      continue;
+    }
+    if (char === ")") {
+      closedGroup = groupStack.pop() ?? null;
+      continue;
+    }
+    if (char === "|") {
+      for (const frame of groupStack) frame.hasAlternation = true;
+      closedGroup = null;
+      continue;
+    }
+    if (char === "*" || char === "+" || char === "{") {
+      if (closedGroup && (closedGroup.hasQuantifier || closedGroup.hasAlternation)) {
+        return "a repetition quantifier is applied to a group that contains a quantifier or alternation";
+      }
+      for (const frame of groupStack) frame.hasQuantifier = true;
+    }
+    closedGroup = null;
+  }
+  return "";
+}
+
 function manifestIssue(pathname, message) {
   return { path: pathname, message };
 }
@@ -392,6 +441,10 @@ function validateAppManifestObject(value) {
       new RegExp(pattern);
     } catch {
       errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "publicPathPattern is not valid regex."));
+    }
+    const unsafePatternReason = unsafeProxyPathPatternReason(pattern);
+    if (unsafePatternReason) {
+      errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, `publicPathPattern is rejected for safety: ${unsafePatternReason}.`));
     }
     if (routeMatchesRootCatchAll(pattern)) errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "Developer app proxy routes must not be root catch-all patterns."));
     if (routeLooksBroadWrite(pattern, method)) errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "Broad write proxy routes require platform-owned first-party routing."));
@@ -1627,6 +1680,42 @@ function appConformanceChecks(normalized) {
   return checks;
 }
 
+function readinessChecks(normalized) {
+  const checks = [];
+  if (!normalized) return checks;
+  const sampleAppId = normalized.appId === "example-workflow";
+  const sampleName = normalized.name === "Example Workflow";
+  const environmentUrls = APP_ENVIRONMENTS.flatMap((environment) => {
+    const config = recordValue(normalized.environments[environment]);
+    return config ? [textValue(config.appBaseUrl), textValue(config.proxyBaseUrl), ...arrayText(config.oauthRedirectUris), ...arrayText(config.orgSelectRedirectUris)].filter(Boolean) : [];
+  });
+  const sampleUrls = environmentUrls.filter((url) => {
+    try {
+      const hostname = new URL(url).hostname.toLowerCase();
+      return hostname === "example-app.example.com" || hostname === "staging.example-app.example.com";
+    } catch {
+      return false;
+    }
+  });
+  checks.push({
+    name: "project-values:replace-sample-app-id",
+    ok: !sampleAppId,
+    status: sampleAppId ? "sample" : "custom"
+  });
+  checks.push({
+    name: "project-values:replace-sample-name",
+    ok: !sampleName,
+    status: sampleName ? "sample" : "custom"
+  });
+  checks.push({
+    name: "project-values:replace-sample-urls",
+    ok: sampleUrls.length === 0,
+    status: sampleUrls.length === 0 ? "custom" : "sample",
+    urls: sampleUrls
+  });
+  return checks;
+}
+
 async function appConformance(args) {
   const { filePath, manifest } = await readAppManifestFile(args);
   const result = validateAppManifestObject(manifest);
@@ -1658,6 +1747,7 @@ async function appDoctor(args) {
   const { filePath, manifest } = await readAppManifestFile(args);
   const result = validateAppManifestObject(manifest);
   const conformanceChecks = appConformanceChecks(result.manifest);
+  const readyChecks = readinessChecks(result.manifest);
   const guidanceChecks = await appGuidanceStatus(path.dirname(filePath), result.manifest || manifest);
   const manualChecks = [
     {
@@ -1669,6 +1759,7 @@ async function appDoctor(args) {
   const checks = [
     { name: "manifest-valid", ok: result.ok },
     ...conformanceChecks,
+    ...readyChecks,
     ...guidanceChecks
   ];
   const ok = result.ok && checks.every((check) => check.ok);
@@ -1695,6 +1786,19 @@ async function appPublish(args) {
     process.exitCode = 1;
     return;
   }
+  const readyChecks = readinessChecks(result.manifest);
+  if (!readyChecks.every((check) => check.ok)) {
+    console.log(JSON.stringify({
+      ok: false,
+      filePath,
+      appId: result.manifest?.appId || "",
+      version: result.manifest?.version || "",
+      errors: readyChecks.filter((check) => !check.ok).map((check) => manifestIssue(`$ readiness:${check.name}`, "Replace sample app init values before publishing.")),
+      checks: readyChecks
+    }, null, 2));
+    process.exitCode = 1;
+    return;
+  }
   if (targetEnvironment === "production") {
     throw new Error("Production app publication requires Intellite review and is not published by this CLI command yet.");
   }
@@ -1711,6 +1815,19 @@ async function appRequestProductionReview(args) {
   const result = validateAppManifestObject(manifest);
   if (!result.ok) {
     printManifestValidation(result, filePath);
+    process.exitCode = 1;
+    return;
+  }
+  const readyChecks = readinessChecks(result.manifest);
+  if (!readyChecks.every((check) => check.ok)) {
+    console.log(JSON.stringify({
+      ok: false,
+      filePath,
+      appId: result.manifest?.appId || "",
+      version: result.manifest?.version || "",
+      errors: readyChecks.filter((check) => !check.ok).map((check) => manifestIssue(`$ readiness:${check.name}`, "Replace sample app init values before requesting production review.")),
+      checks: readyChecks
+    }, null, 2));
     process.exitCode = 1;
     return;
   }
