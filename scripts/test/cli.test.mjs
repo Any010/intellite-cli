@@ -125,6 +125,88 @@ test("app help prints developer app commands", async () => {
   });
 });
 
+// --- developer app manifest checks ------------------------------------------
+
+test("app init scaffolds the current schema v2 manifest and validates offline", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "intellite.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    assert.equal(manifest.schemaVersion, 2);
+    assert.ok(Array.isArray(manifest.resources), "schema v2 sample should include resources");
+    assert.ok(Array.isArray(manifest.actions), "schema v2 sample should include actions");
+    assert.ok(Array.isArray(manifest.events), "schema v2 sample should include events");
+
+    const validate = await runCli(["app", "validate", manifestPath], { home });
+    assert.equal(validate.code, 0);
+    const body = JSON.parse(validate.stdout);
+    assert.equal(body.ok, true);
+  });
+});
+
+test("app validate accepts unsigned skills with a warning because publish signs them server-side", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "unsigned-skill.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    delete manifest.skills[0].signature;
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+    const validate = await runCli(["app", "validate", manifestPath], { home });
+    assert.equal(validate.code, 0);
+    const body = JSON.parse(validate.stdout);
+    assert.equal(body.ok, true);
+    assert.match(JSON.stringify(body.warnings), /signs unsigned skills/);
+  });
+});
+
+test("app validate rejects root catch-all routes", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "catchall.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    manifest.proxyRoutes[0].publicPathPattern = "^/.*";
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+    const validate = await runCli(["app", "validate", manifestPath], { home });
+    assert.equal(validate.code, 1);
+    const body = JSON.parse(validate.stdout);
+    assert.equal(body.ok, false);
+    assert.match(JSON.stringify(body.errors), /root catch-all/);
+  });
+});
+
+test("app validate rejects high-risk automatic actions", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "dangerous-action.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    manifest.actions[0].risk = "external_send";
+    manifest.actions[0].approval = "auto";
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+    const validate = await runCli(["app", "validate", manifestPath], { home });
+    assert.equal(validate.code, 1);
+    const body = JSON.parse(validate.stdout);
+    assert.equal(body.ok, false);
+    assert.match(JSON.stringify(body.errors), /High-risk actions/);
+  });
+});
+
+test("app call tickets preserve identity headers without forwarding internal service headers", async () => {
+  const cli = await fs.readFile(CLI_PATH, "utf8");
+  assert.match(cli, /APP_TICKET_HEADER_ALLOWLIST/);
+  assert.match(cli, /"x-pages-user-email"/);
+  assert.match(cli, /"x-pages-identity-signature"/);
+  assert.doesNotMatch(cli, /"x-rpa-internal-api-call"/);
+  assert.doesNotMatch(cli, /"x-rpa-internal-user-email"/);
+});
+
 test("no command prints usage and exits 0", async () => {
   await withTempHome(async (home) => {
     const result = await runCli([], { home });

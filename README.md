@@ -84,9 +84,9 @@ Skill sync can also be run explicitly:
 npx intellite agent setup
 ```
 
-## Developer SDK Direction
+## Developer App Workflow
 
-Implemented local developer checks:
+The public CLI includes the developer app workflow:
 
 ```bash
 npx intellite app init --output intellite.app.json
@@ -100,7 +100,15 @@ npx intellite --env staging app request-production-review intellite.app.json
 `init`, `validate`, and `conformance` are local checks. `publish --app-env staging` sends a validated manifest to the selected Intellite environment and registers the app for the signed-in organization. `request-production-review` stores a production manifest as pending review; it is not active until platform approval. Production publication is intentionally not self-service.
 `app list` shows the manifest versions and environments registered for the signed-in developer organization.
 
-Planned server-backed SDK commands:
+`app init` scaffolds the current `schemaVersion: 2` manifest. In addition to capabilities, roles, environments, proxy routes, and skills, v2 manifests can declare:
+
+- `resources`: typed objects the assistant can refer to with stable `intellite://apps/...` references.
+- `actions`: callable operations with capability, risk, and approval metadata. `external_send` and `destructive` actions must require `confirm` or `admin`.
+- `events`: app-emitted lifecycle or business events tied to resources.
+
+If a skill package has no signature, local validation reports a warning. Intellite signs unsigned skill packages server-side during staging publish and production review when the platform signing secret is configured.
+
+Planned additional SDK commands:
 
 ```bash
 npx intellite app dev-link --env staging

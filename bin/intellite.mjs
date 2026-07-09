@@ -55,8 +55,13 @@ const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
 const CAPABILITY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,159}$/;
 const ROLE_PATTERN = /^[a-z][a-z0-9_-]{0,39}$/;
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const INTEGRATION_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,159}$/;
 const APP_ENVIRONMENTS = ["local", "staging", "production"];
 const APP_ROUTE_METHODS = new Set(["*", "READ", "WRITE", "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]);
+const ACTION_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const ACTION_RISKS = new Set(["read", "write", "workflow_run", "external_artifact", "external_send", "destructive"]);
+const ACTION_APPROVALS = new Set(["auto", "confirm", "admin"]);
+const WRITE_ROUTE_METHODS = new Set(["*", "WRITE", "POST", "PUT", "PATCH", "DELETE"]);
 
 function usage() {
   console.log(`intellite
@@ -248,10 +253,42 @@ function arrayText(value) {
 function isHttpUrl(value) {
   try {
     const url = new URL(value);
-    return url.protocol === "https:" || url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    const local = ["localhost", "127.0.0.1", "::1", "[::1]"].includes(url.hostname.toLowerCase());
+    return url.protocol === "https:" || (url.protocol === "http:" && local);
   } catch {
     return false;
   }
+}
+
+function urlIsLocalhost(value) {
+  try {
+    return ["localhost", "127.0.0.1", "::1", "[::1]"].includes(new URL(value).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function stagingUrlLooksProduction(url) {
+  const value = String(url || "").toLowerCase();
+  return !value.includes("staging") && !value.includes("localhost") && /(intellite\.app|rpa-box\.com|pages\.dev)/.test(value);
+}
+
+function productionUrlLooksStaging(url) {
+  const value = String(url || "").toLowerCase();
+  return value.includes("staging") || value.includes("workers.dev");
+}
+
+function routeMatchesRootCatchAll(pattern) {
+  try {
+    const regex = new RegExp(pattern);
+    return regex.test("/") && regex.test("/__intellite_probe__/nested");
+  } catch {
+    return false;
+  }
+}
+
+function routeLooksBroadWrite(pattern, method) {
+  return WRITE_ROUTE_METHODS.has(method) && /(?:\.\*|\.\+|\[\^\/\]\*(?:\)|$)|\(\?:\/\.\*\)\?)/.test(pattern);
 }
 
 function manifestIssue(pathname, message) {
@@ -274,6 +311,9 @@ function normalizeManifest(value) {
     environments: recordValue(root.environments) || {},
     proxyRoutes: Array.isArray(root.proxyRoutes) ? root.proxyRoutes.map(recordValue).filter(Boolean) : [],
     skills: Array.isArray(root.skills) ? root.skills.map(recordValue).filter(Boolean) : [],
+    resources: Array.isArray(root.resources) ? root.resources.map(recordValue).filter(Boolean) : [],
+    actions: Array.isArray(root.actions) ? root.actions.map(recordValue).filter(Boolean) : [],
+    events: Array.isArray(root.events) ? root.events.map(recordValue).filter(Boolean) : [],
     usageGuide: recordValue(root.usageGuide) || {},
     lifecycle: recordValue(root.lifecycle) || {}
   };
@@ -284,7 +324,7 @@ function validateAppManifestObject(value) {
   const errors = [];
   const warnings = [];
   if (!manifest) return { ok: false, errors: [manifestIssue("$", "Manifest must be a JSON object.")], warnings: [] };
-  if (manifest.schemaVersion !== 1) errors.push(manifestIssue("$.schemaVersion", "schemaVersion must be 1."));
+  if (manifest.schemaVersion !== 1 && manifest.schemaVersion !== 2) errors.push(manifestIssue("$.schemaVersion", "schemaVersion must be 1 or 2."));
   if (!APP_ID_PATTERN.test(manifest.appId)) errors.push(manifestIssue("$.appId", "appId is invalid."));
   if (!manifest.name) errors.push(manifestIssue("$.name", "name is required."));
   if (!manifest.version) errors.push(manifestIssue("$.version", "version is required."));
@@ -329,6 +369,10 @@ function validateAppManifestObject(value) {
         if (redirectUri.includes("*")) errors.push(manifestIssue(`$.environments.${environment}.${key}[${index}]`, "Redirect URI must not contain wildcards."));
       });
     }
+    const urls = [appBaseUrl, proxyBaseUrl, ...arrayText(config.oauthRedirectUris), ...arrayText(config.orgSelectRedirectUris)].filter(Boolean);
+    if (environment !== "local" && urls.some(urlIsLocalhost)) errors.push(manifestIssue(`$.environments.${environment}`, "Only local environment may use localhost URLs."));
+    if (environment === "staging" && urls.some(stagingUrlLooksProduction)) errors.push(manifestIssue("$.environments.staging", "Staging URLs appear to reference production domains."));
+    if (environment === "production" && urls.some(productionUrlLooksStaging)) errors.push(manifestIssue("$.environments.production", "Production URLs appear to reference staging domains."));
   }
 
   manifest.proxyRoutes.forEach((route, index) => {
@@ -344,6 +388,8 @@ function validateAppManifestObject(value) {
     } catch {
       errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "publicPathPattern is not valid regex."));
     }
+    if (routeMatchesRootCatchAll(pattern)) errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "Developer app proxy routes must not be root catch-all patterns."));
+    if (routeLooksBroadWrite(pattern, method)) errors.push(manifestIssue(`$.proxyRoutes[${index}].publicPathPattern`, "Broad write proxy routes require platform-owned first-party routing."));
     if (!replacement.startsWith("/") && replacement !== "$&") errors.push(manifestIssue(`$.proxyRoutes[${index}].upstreamPathReplacement`, "upstreamPathReplacement must be a path replacement."));
     if (/^https?:\/\//i.test(replacement)) errors.push(manifestIssue(`$.proxyRoutes[${index}].upstreamPathReplacement`, "upstreamPathReplacement must not include an origin."));
     if (capabilities.length === 0) errors.push(manifestIssue(`$.proxyRoutes[${index}].capabilities`, "Route must require capabilities."));
@@ -357,15 +403,70 @@ function validateAppManifestObject(value) {
     for (const capability of arrayText(skill.requiredCapabilities)) {
       if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.skills[${index}].requiredCapabilities`, `Undeclared capability: ${capability}`));
     }
+    if (!textValue(skill.signature)) {
+      warnings.push(manifestIssue(`$.skills[${index}].signature`, "Skill package has no signature. Intellite signs unsigned skills during publish and production review."));
+    }
+    for (const file of Array.isArray(skill.files) ? skill.files : []) {
+      const filePath = textValue(recordValue(file)?.path);
+      if (!filePath || path.isAbsolute(filePath) || filePath.split(/[\\/]/).includes("..")) {
+        errors.push(manifestIssue(`$.skills[${index}].files`, "Skill file paths must be relative and must not contain .. segments."));
+      }
+    }
+  });
+
+  const declaredResources = new Set();
+  manifest.resources.forEach((resource, index) => {
+    const type = textValue(resource.type);
+    if (!INTEGRATION_ID_PATTERN.test(type)) errors.push(manifestIssue(`$.resources[${index}].type`, "Resource type is invalid."));
+    else declaredResources.add(type);
+    for (const capability of arrayText(resource.capabilities)) {
+      if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.resources[${index}].capabilities`, `Undeclared capability: ${capability}`));
+    }
+    const referencePattern = textValue(resource.referencePattern);
+    if (referencePattern && !referencePattern.startsWith("intellite://apps/")) errors.push(manifestIssue(`$.resources[${index}].referencePattern`, "referencePattern must use intellite://apps/."));
+  });
+
+  manifest.actions.forEach((action, index) => {
+    const id = textValue(action.id);
+    const method = textValue(action.method).toUpperCase();
+    const pathTemplate = textValue(action.pathTemplate);
+    const capability = textValue(action.capability);
+    const resourceType = textValue(action.resourceType);
+    const risk = textValue(action.risk);
+    const approval = textValue(action.approval);
+    if (!INTEGRATION_ID_PATTERN.test(id)) errors.push(manifestIssue(`$.actions[${index}].id`, "Action id is invalid."));
+    if (!ACTION_METHODS.has(method)) errors.push(manifestIssue(`$.actions[${index}].method`, "Action method is invalid."));
+    if (!pathTemplate.startsWith("/")) errors.push(manifestIssue(`$.actions[${index}].pathTemplate`, "Action pathTemplate must start with /."));
+    if (/^https?:\/\//i.test(pathTemplate)) errors.push(manifestIssue(`$.actions[${index}].pathTemplate`, "Action pathTemplate must not include an origin."));
+    if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.actions[${index}].capability`, `Undeclared capability: ${capability}`));
+    if (resourceType && !declaredResources.has(resourceType)) errors.push(manifestIssue(`$.actions[${index}].resourceType`, `Undeclared resource type: ${resourceType}`));
+    if (!ACTION_RISKS.has(risk)) errors.push(manifestIssue(`$.actions[${index}].risk`, "Action risk is invalid."));
+    if (!ACTION_APPROVALS.has(approval)) errors.push(manifestIssue(`$.actions[${index}].approval`, "Action approval is invalid."));
+    if ((risk === "external_send" || risk === "destructive") && approval === "auto") {
+      errors.push(manifestIssue(`$.actions[${index}].approval`, "High-risk actions must require confirm or admin approval."));
+    }
+  });
+
+  manifest.events.forEach((event, index) => {
+    const id = textValue(event.id);
+    const resourceType = textValue(event.resourceType);
+    const schemaVersion = Number(event.schemaVersion);
+    if (!INTEGRATION_ID_PATTERN.test(id)) errors.push(manifestIssue(`$.events[${index}].id`, "Event id is invalid."));
+    if (!Number.isInteger(schemaVersion) || schemaVersion <= 0) errors.push(manifestIssue(`$.events[${index}].schemaVersion`, "Event schemaVersion must be a positive integer."));
+    if (resourceType && !declaredResources.has(resourceType)) errors.push(manifestIssue(`$.events[${index}].resourceType`, `Undeclared resource type: ${resourceType}`));
+    for (const capability of arrayText(event.capabilities)) {
+      if (!declaredCapabilities.has(capability)) errors.push(manifestIssue(`$.events[${index}].capabilities`, `Undeclared capability: ${capability}`));
+    }
   });
   if (!manifest.proxyRoutes.some((route) => /usage-guide/.test(textValue(route.publicPathPattern)))) warnings.push(manifestIssue("$.proxyRoutes", "No usage-guide proxy route is declared."));
   if (manifest.skills.length === 0) warnings.push(manifestIssue("$.skills", "No skill package is declared."));
+  if (manifest.visibility === "public" && manifest.lifecycle.productionReviewRequired === false) errors.push(manifestIssue("$.lifecycle.productionReviewRequired", "Public production apps must require Intellite review."));
   return { ok: errors.length === 0, errors, warnings, manifest };
 }
 
 function sampleAppManifest() {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     appId: "example-workflow",
     name: "Example Workflow",
     description: "Example Intellite-connected business app.",
@@ -423,7 +524,35 @@ function sampleAppManifest() {
         description: "Operate Example Workflow through the Intellite local agent path.",
         version: "0.1.0",
         requiredCapabilities: ["example-workflow.read"],
+        signature: "replace-with-intellite-platform-signature",
         files: [{ path: "SKILL.md", content: "# Example Workflow App\n\nUse `intellite agent api` with `/api/intellite/apps/example-workflow/...` paths only.\n" }]
+      }
+    ],
+    resources: [
+      {
+        type: "workflow",
+        capabilities: ["example-workflow.read"],
+        referencePattern: "intellite://apps/example-workflow/workflows/{resourceId}"
+      }
+    ],
+    actions: [
+      {
+        id: "workflow.run",
+        method: "POST",
+        pathTemplate: "/v1/workflows/{resourceId}/runs",
+        capability: "example-workflow.write",
+        resourceType: "workflow",
+        risk: "workflow_run",
+        approval: "confirm",
+        idempotent: true
+      }
+    ],
+    events: [
+      {
+        id: "workflow.completed",
+        resourceType: "workflow",
+        schemaVersion: 1,
+        capabilities: ["example-workflow.read"]
       }
     ],
     usageGuide: { path: "/api/usage-guide", format: "markdown" },
@@ -866,6 +995,19 @@ function assertAppTicketUrl(value) {
   return url.toString();
 }
 
+const APP_TICKET_HEADER_ALLOWLIST = new Set([
+  "x-pages-user-email",
+  "x-pages-identity-timestamp",
+  "x-pages-identity-signature",
+  "x-user-email",
+  "x-organization-id"
+]);
+
+function isAllowedAppTicketHeader(key) {
+  const normalized = String(key || "").trim().toLowerCase();
+  return /^x-intellite-[a-z0-9-]+$/.test(normalized) || APP_TICKET_HEADER_ALLOWLIST.has(normalized);
+}
+
 function appTicketHeaders(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Intellite returned invalid app call headers.");
@@ -873,7 +1015,7 @@ function appTicketHeaders(value) {
   const headers = new Headers();
   for (const [key, item] of Object.entries(value)) {
     if (typeof item !== "string") continue;
-    if (!/^x-intellite-[a-z0-9-]+$/i.test(key)) continue;
+    if (!isAllowedAppTicketHeader(key)) continue;
     if ([...item].some((char) => char.charCodeAt(0) > 255)) continue;
     headers.set(key, item);
   }
@@ -1062,13 +1204,40 @@ async function managedSkillDirectories(root) {
     if (!entry.isDirectory()) continue;
     const dir = path.join(root, entry.name);
     try {
-      const marker = JSON.parse(await fs.readFile(path.join(dir, MANAGED_SKILL_FILE), "utf8"));
+      const marker = await readManagedSkillMarker(dir);
       if (marker?.managedBy === "intellite" && marker?.name === entry.name) managed.push({ name: entry.name, dir });
     } catch {
       // Unmanaged skill directories are left untouched.
     }
   }
   return managed;
+}
+
+async function readManagedSkillMarker(skillDir) {
+  const markerPath = path.join(skillDir, MANAGED_SKILL_FILE);
+  await assertNotSymlink(markerPath);
+  return JSON.parse(await fs.readFile(markerPath, "utf8"));
+}
+
+async function assertCanOverwriteSkillDirectory(skillDir, skillName) {
+  let stats;
+  try {
+    stats = await fs.lstat(skillDir);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (stats.isSymbolicLink()) throw new Error(`Refusing to write through symlink: ${skillDir}`);
+  if (!stats.isDirectory()) throw new Error(`Refusing to overwrite non-directory skill path: ${skillDir}`);
+  let marker;
+  try {
+    marker = await readManagedSkillMarker(skillDir);
+  } catch {
+    marker = null;
+  }
+  if (marker?.managedBy !== "intellite" || marker?.name !== skillName) {
+    throw new Error(`Refusing to overwrite unmanaged skill directory: ${skillDir}. Remove or rename it, or add a valid ${MANAGED_SKILL_FILE} marker.`);
+  }
 }
 
 async function syncSkillsToRoot(skills, root, options = {}) {
@@ -1078,7 +1247,7 @@ async function syncSkillsToRoot(skills, root, options = {}) {
   for (const skill of skills) {
     const skillDir = path.join(root, skill.name);
     const resolvedSkillDir = path.resolve(skillDir);
-    await assertNotSymlink(skillDir);
+    await assertCanOverwriteSkillDirectory(skillDir, skill.name);
     await fs.mkdir(skillDir, { recursive: true });
     for (const file of skill.files) {
       const target = path.resolve(skillDir, file.path);

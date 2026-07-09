@@ -112,6 +112,13 @@ if (!cli.includes("config.staging.json")) fail("CLI must separate staging config
 if (!cli.includes("skills-staging")) fail("CLI must separate staging skills from production skills.");
 if (!cli.includes("agent context")) fail("CLI must expose the current local agent context command.");
 if (!cli.includes("app request-production-review")) fail("CLI must expose the production review request command.");
+if (!cli.includes("schemaVersion: 2")) fail("CLI app init must scaffold the current manifest schema.");
+if (!cli.includes("manifest.resources")) fail("CLI manifest validator must support schema v2 resources.");
+if (!cli.includes("manifest.actions")) fail("CLI manifest validator must support schema v2 actions.");
+if (!cli.includes("manifest.events")) fail("CLI manifest validator must support schema v2 events.");
+if (!cli.includes("High-risk actions must require confirm or admin approval")) fail("CLI must reject automatic high-risk app actions.");
+if (!cli.includes("APP_TICKET_HEADER_ALLOWLIST")) fail("CLI must preserve only allowed signed app-ticket headers.");
+if (cli.includes("\"x-rpa-internal-api-call\"") || cli.includes("\"x-rpa-internal-user-email\"")) fail("CLI must not forward internal service headers from app-call tickets.");
 if (cli.includes("command === \"quote\"") || cli.includes("command === \"evidence\"")) fail("Base Intellite CLI must not expose app-specific commands.");
 if (cli.includes("quote calculate") || cli.includes("quote create") || cli.includes("evidence create")) fail("Base Intellite CLI help must stay app-neutral.");
 if (JSON.stringify(packageJson.keywords ?? []).toLowerCase().includes("quote")) fail("package keywords must stay app-neutral.");
