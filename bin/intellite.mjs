@@ -44,13 +44,14 @@ let TOKEN_SERVICE = activeEnvironment.tokenService;
 let TOKEN_ACCOUNT = activeEnvironment.tokenAccount;
 let TOKEN_LABEL = activeEnvironment.tokenLabel;
 let DPAPI_TOKEN_FILE = path.join(CONFIG_DIR, activeEnvironment.dpapiTokenFileName);
+const CLI_VERSION = "0.3.13";
 const DEFAULT_PERMISSIONS = [];
 const MAX_JSON_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_SKILLS = 20;
 const MAX_SKILL_FILES = 20;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
-const APP_GUIDANCE_VERSION = "2026-07-09.2";
+const APP_GUIDANCE_VERSION = "2026-07-09.3";
 const APP_GUIDANCE_DIR = ".intellite";
 const APP_GUIDANCE_LOCK_FILE = "guidance-lock.json";
 const APP_API_PREFIX = "/api/intellite/apps/";
@@ -664,10 +665,10 @@ This project-local file teaches AI coding agents how to work on this repository 
 ## App Implementation Requirements
 
 - Implement a usage-guide endpoint and declare it in \`proxyRoutes\`.
-- Verify Intellite App Bridge signatures on proxied requests.
-- Enforce the capabilities supplied by Intellite on each request.
-- Reject stale timestamps and replayed request IDs.
-- Never use sample identities, test organization IDs, or display names as production authority.
+- Verify Intellite proxy signatures on requests that arrive with \`X-Intellite-Proxy-*\` headers.
+- Enforce the signed capabilities supplied by Intellite on each request.
+- Reject stale timestamps, expired claims, body hash mismatches, and replayed request IDs.
+- Never use sample identities, unsigned \`X-Intellite-*\` headers, test organization IDs, or display names as production authority.
 
 See \`.intellite/examples/usage-guide.md\` and \`.intellite/examples/proxy-signature-verification.md\`.
 `
@@ -703,20 +704,83 @@ The response should explain only supported app operations. It should not include
     {
       path: `${APP_GUIDANCE_DIR}/examples/proxy-signature-verification.md`,
       content: `<!-- intellite-app-guidance-version: ${APP_GUIDANCE_VERSION} -->
-# Proxy Signature Verification Example
+# Intellite Proxy Signature Verification Example
 
-Every state-changing or data-bearing app route reached through Intellite must verify the signed App Bridge request before trusting the user, organization, or capabilities in the headers.
+Every state-changing or data-bearing app route reached through Intellite must verify the signed proxy request before trusting the user, organization, or capabilities in the headers.
 
 Minimum checks:
 
-- Verify the HMAC-SHA256 signature using the app bridge secret configured for this app.
-- Include timestamp, method, path, app id, user id, email, organization id, capabilities, and request body hash in the signed payload according to the platform contract.
+- Verify \`X-Intellite-Proxy-Signature\` with HMAC-SHA256 using the proxy secret configured for this app.
+- Build the signature payload as \`timestamp + "\\n" + method + "\\n" + pathname + "\\n" + search + "\\n" + bodySha256 + "\\n" + claims\`.
+- Verify \`X-Intellite-Proxy-Body-Sha256\` against the raw request body bytes.
+- Decode \`X-Intellite-Proxy-Claims\` as base64url JSON and check \`aud\`, \`appId\`, \`method\`, \`path\`, \`query\`, \`exp\`, \`jti\`, and \`capabilities\`.
 - Reject stale timestamps.
-- Reject replayed request IDs with durable storage.
+- Reject replayed \`jti\` values with durable storage until at least the claim expiry.
 - Check the declared capability before reading or writing app data.
 - Fail closed on missing headers, missing secret, signature mismatch, stale timestamp, replay, or insufficient capability.
 
-Do not bypass this by trusting app-origin sessions, display names, email text, or local development headers.
+Node/Fetch-style verification skeleton:
+
+\`\`\`js
+import crypto from "node:crypto";
+
+const AUDIENCE = "intellite-app-proxy";
+const MAX_CLOCK_SKEW_SECONDS = 300;
+
+function base64url(buffer) {
+  return Buffer.from(buffer).toString("base64").replace(/\\+/g, "-").replace(/\\//g, "_").replace(/=+$/g, "");
+}
+
+function timingSafeEqualText(left, right) {
+  const a = Buffer.from(String(left));
+  const b = Buffer.from(String(right));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function fail(message, status = 401) {
+  const error = new Error(message);
+  error.status = status;
+  throw error;
+}
+
+export async function verifyIntelliteProxyRequest(request, { appId, proxySecret, requiredCapability, replayStore }) {
+  if (!proxySecret) fail("missing Intellite proxy secret", 503);
+  const url = new URL(request.url);
+  const timestamp = request.headers.get("x-intellite-proxy-timestamp") || "";
+  const signature = request.headers.get("x-intellite-proxy-signature") || "";
+  const bodySha256 = request.headers.get("x-intellite-proxy-body-sha256") || "";
+  const encodedClaims = request.headers.get("x-intellite-proxy-claims") || "";
+  if (!timestamp || !signature || !bodySha256 || !encodedClaims) fail("missing Intellite proxy signature headers");
+
+  const now = Math.floor(Date.now() / 1000);
+  if (!/^\\d+$/.test(timestamp) || Math.abs(now - Number(timestamp)) > MAX_CLOCK_SKEW_SECONDS) fail("stale Intellite proxy timestamp");
+
+  const rawBody = Buffer.from(await request.clone().arrayBuffer());
+  const actualBodySha256 = base64url(crypto.createHash("sha256").update(rawBody).digest());
+  if (!timingSafeEqualText(actualBodySha256, bodySha256)) fail("invalid Intellite proxy body hash");
+
+  const payload = [timestamp, request.method.toUpperCase(), url.pathname, url.search, bodySha256, encodedClaims].join("\\n");
+  const expectedSignature = base64url(crypto.createHmac("sha256", proxySecret).update(payload).digest());
+  if (!timingSafeEqualText(expectedSignature, signature)) fail("invalid Intellite proxy signature");
+
+  const claims = JSON.parse(Buffer.from(encodedClaims, "base64url").toString("utf8"));
+  if (claims.aud !== AUDIENCE || claims.appId !== appId) fail("invalid Intellite proxy audience");
+  if (claims.method !== request.method.toUpperCase() || claims.path !== url.pathname || claims.query !== url.search) fail("invalid Intellite proxy target");
+  if (!Number.isFinite(claims.exp) || claims.exp < now) fail("expired Intellite proxy claims");
+  if (!claims.jti || await replayStore.has(claims.jti)) fail("replayed Intellite proxy request");
+  await replayStore.put(claims.jti, claims.exp);
+  if (!Array.isArray(claims.capabilities) || !claims.capabilities.includes(requiredCapability)) fail("missing Intellite capability", 403);
+
+  return {
+    userId: claims.userId,
+    userEmail: claims.userEmail,
+    orgId: claims.orgId,
+    capabilities: claims.capabilities
+  };
+}
+\`\`\`
+
+Do not bypass this by trusting app-origin sessions, display names, email text, or unsigned local development headers.
 `
     }
   ];
@@ -1751,9 +1815,9 @@ async function appDoctor(args) {
   const guidanceChecks = await appGuidanceStatus(path.dirname(filePath), result.manifest || manifest);
   const manualChecks = [
     {
-      name: "app-bridge-signature-verification",
+      name: "intellite-proxy-signature-verification",
       status: "manual",
-      message: "Verify the app implementation checks Intellite App Bridge HMAC signatures, timestamp freshness, replay IDs, and capabilities."
+      message: "Verify the app implementation checks X-Intellite-Proxy-* HMAC signatures, claims expiry, replay IDs, body hashes, and capabilities."
     }
   ];
   const checks = [
@@ -1969,6 +2033,10 @@ async function main() {
   const [command, ...args] = extractGlobalOptions(process.argv.slice(2));
   if (!command || command === "help" || command === "--help" || command === "-h") {
     usage();
+    return;
+  }
+  if (command === "version" || command === "--version" || command === "-v") {
+    console.log(CLI_VERSION);
     return;
   }
   if (command === "login") return login(args);

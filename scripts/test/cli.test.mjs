@@ -100,6 +100,15 @@ test("help command prints usage and exits 0", async () => {
   });
 });
 
+test("version command prints the package version", async () => {
+  await withTempHome(async (home) => {
+    const packageJson = JSON.parse(await fs.readFile(path.join(path.dirname(CLI_PATH), "..", "package.json"), "utf8"));
+    const result = await runCli(["--version"], { home });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout.trim(), packageJson.version);
+  });
+});
+
 test("agent help prints the supported local agent surface", async () => {
   await withTempHome(async (home) => {
     const result = await runCli(["agent", "--help"], { home });
@@ -147,7 +156,10 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const lockPath = path.join(home, ".intellite", "guidance-lock.json");
     assert.match(await fs.readFile(guidancePath, "utf8"), /Intellite App Agent Guidance/);
     assert.match(await fs.readFile(usageGuideExamplePath, "utf8"), /Usage Guide Endpoint Example/);
-    assert.match(await fs.readFile(signatureExamplePath, "utf8"), /Proxy Signature Verification Example/);
+    const signatureExample = await fs.readFile(signatureExamplePath, "utf8");
+    assert.match(signatureExample, /Intellite Proxy Signature Verification Example/);
+    assert.match(signatureExample, /X-Intellite-Proxy-Signature/);
+    assert.match(signatureExample, /intellite-app-proxy/);
     assert.equal(JSON.parse(await fs.readFile(lockPath, "utf8")).kind, "app-guidance");
     assert.equal(await fileExists(path.join(home, ".codex")), false, "app init must not install global Codex skills");
 
@@ -176,7 +188,7 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     assert.equal(doctor.code, 0);
     const doctorBody = JSON.parse(doctor.stdout);
     assert.equal(doctorBody.ok, true);
-    assert.match(JSON.stringify(doctorBody.manualChecks), /App Bridge/);
+    assert.match(JSON.stringify(doctorBody.manualChecks), /X-Intellite-Proxy/);
   });
 });
 

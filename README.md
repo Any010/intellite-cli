@@ -112,7 +112,7 @@ If a skill package has no signature, local validation reports a warning. Intelli
 
 `app refresh` updates `.intellite/agent-guidance.md` and `.intellite/examples/` from the current CLI templates. Files that still match the last generated hash are updated in place. User-edited files are not overwritten; the new version is written next to them as `.new`.
 
-`app doctor` runs manifest validation, conformance checks, sample-value readiness checks, and project-local guidance freshness checks. It also reports manual implementation checks such as App Bridge signature verification.
+`app doctor` runs manifest validation, conformance checks, sample-value readiness checks, and project-local guidance freshness checks. It also reports manual implementation checks such as `X-Intellite-Proxy-*` signature verification.
 
 Planned additional SDK commands:
 
