@@ -148,6 +148,9 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const manifestPath = path.join(home, "intellite.app.json");
     const init = await runCli(["app", "init", "--output", manifestPath], { home });
     assert.equal(init.code, 0);
+    const initBody = JSON.parse(init.stdout);
+    assert.equal(initBody.aiEntryPoint, ".intellite/IMPLEMENT_INTELLITE.md");
+    assert.match(initBody.aiInstruction, /implement every required deliverable/i);
 
     const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
     assert.equal(manifest.schemaVersion, 2);
@@ -156,13 +159,32 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     assert.ok(Array.isArray(manifest.events), "schema v2 sample should include events");
 
     const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
+    const aiEntryPointPath = path.join(home, ".intellite", "IMPLEMENT_INTELLITE.md");
+    const requirementsPath = path.join(home, ".intellite", "integration-requirements.json");
     const usageGuideExamplePath = path.join(home, ".intellite", "examples", "usage-guide.md");
     const signatureExamplePath = path.join(home, ".intellite", "examples", "proxy-signature-verification.md");
     const oauthExamplePath = path.join(home, ".intellite", "examples", "oauth-connection.md");
+    const storageExamplePath = path.join(home, ".intellite", "examples", "storage-and-audit.md");
+    const frameworkExamplePath = path.join(home, ".intellite", "examples", "framework-recipes.md");
     const verifierPath = path.join(home, "intellite", "intellite-proxy.mjs");
     const oauthPath = path.join(home, "intellite", "intellite-oauth.mjs");
     const lockPath = path.join(home, ".intellite", "guidance-lock.json");
     assert.match(await fs.readFile(guidancePath, "utf8"), /Intellite App Agent Guidance/);
+    const aiEntryPoint = await fs.readFile(aiEntryPointPath, "utf8");
+    assert.match(aiEntryPoint, /Implement Intellite in This Existing App/);
+    assert.match(aiEntryPoint, /existing login/);
+    assert.match(aiEntryPoint, /authorizeIntelliteProxyRequest/);
+    assert.match(aiEntryPoint, /staging signed probe/);
+    const requirements = JSON.parse(await fs.readFile(requirementsPath, "utf8"));
+    assert.equal(requirements.schemaVersion, 1);
+    assert.equal(requirements.appId, "example-workflow");
+    assert.deepEqual(
+      ["oauth-transaction-store", "connection-ux", "app-audit", "staging-proof"].every((id) => requirements.requiredDeliverables.some((item) => item.id === id)),
+      true
+    );
+    assert.ok(requirements.manualReviewRequired.some((item) => item.id === "existing-auth-regression"));
+    assert.match(await fs.readFile(storageExamplePath, "utf8"), /atomic database operation/);
+    assert.match(await fs.readFile(frameworkExamplePath, "utf8"), /current local roles and resource ACLs/);
     assert.match(await fs.readFile(usageGuideExamplePath, "utf8"), /Usage Guide Endpoint Example/);
     const signatureExample = await fs.readFile(signatureExamplePath, "utf8");
     assert.match(signatureExample, /Intellite Proxy Signature Verification Example/);
@@ -190,6 +212,9 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const sampleDoctorBody = JSON.parse(sampleDoctor.stdout);
     assert.equal(sampleDoctorBody.ok, false);
     assert.match(JSON.stringify(sampleDoctorBody.checks), /replace-sample-app-id/);
+    assert.equal(sampleDoctorBody.aiEntryPoint, ".intellite/IMPLEMENT_INTELLITE.md");
+    assert.ok(sampleDoctorBody.nextActions.some((item) => item.guide === ".intellite/IMPLEMENT_INTELLITE.md"));
+    assert.ok(sampleDoctorBody.manualReviewRequired.some((item) => item.id === "real-environment-proof"));
 
     const readyManifest = JSON.parse(
       JSON.stringify(manifest)
@@ -203,7 +228,9 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     assert.equal(refresh.code, 0);
     const generatedOnlyDoctor = await runCli(["app", "doctor", manifestPath], { home });
     assert.equal(generatedOnlyDoctor.code, 1);
-    assert.match(JSON.stringify(JSON.parse(generatedOnlyDoctor.stdout).checks), /implementation:oauth-connection/);
+    const generatedOnlyDoctorBody = JSON.parse(generatedOnlyDoctor.stdout);
+    assert.match(JSON.stringify(generatedOnlyDoctorBody.checks), /implementation:oauth-connection/);
+    assert.ok(generatedOnlyDoctorBody.nextActions.some((item) => item.check === "implementation:oauth-connection"));
     await fs.mkdir(path.join(home, "src"), { recursive: true });
     await fs.writeFile(path.join(home, "src", "intellite-route.mjs"), `
 import { authorizeIntelliteProxyRequest } from "../intellite/intellite-proxy.mjs";
@@ -234,6 +261,8 @@ export async function callback(options) {
     assert.equal(doctorBody.localReady, true);
     assert.equal(doctorBody.runtimeReady, false);
     assert.match(JSON.stringify(doctorBody.implementationEvidenceFiles), /src\/intellite-route.mjs/);
+    assert.ok(doctorBody.nextActions.some((item) => item.check === "runtime:staging-probe-current"));
+    assert.match(doctorBody.completionRule, /manualReviewRequired/);
   });
 });
 
@@ -261,6 +290,7 @@ app.post("/api/orders", createOrder);
     assert.equal(body.appId, "order-console");
     assert.equal(body.framework, "express");
     assert.equal(body.routeCandidateCount, 2);
+    assert.equal(body.aiEntryPoint, ".intellite/IMPLEMENT_INTELLITE.md");
     const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
     assert.equal(manifest.proxyRoutes.length, 1);
     assert.equal(manifest.proxyRoutes[0].routeId, "usage-guide-read");
@@ -269,6 +299,10 @@ app.post("/api/orders", createOrder);
     const report = JSON.parse(await fs.readFile(path.join(home, ".intellite", "adoption-report.json"), "utf8"));
     assert.equal(report.automaticExposure.length, 0);
     assert.deepEqual(report.routeCandidates.map((route) => route.path).sort(), ["/api/orders", "/api/orders"]);
+    assert.equal(report.aiHandoff.aiEntryPoint, ".intellite/IMPLEMENT_INTELLITE.md");
+    assert.equal(report.recommendedReadOrder[0], ".intellite/IMPLEMENT_INTELLITE.md");
+    assert.ok(report.completionCommands.some((command) => command.includes("app probe")));
+    assert.ok(report.manualReviewRequired.some((item) => item.id === "authoritative-local-authorization"));
   });
 });
 
@@ -555,8 +589,10 @@ test("app refresh does not overwrite user-edited guidance files", async () => {
     assert.equal(init.code, 0);
 
     const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
+    const aiEntryPointPath = path.join(home, ".intellite", "IMPLEMENT_INTELLITE.md");
     const oauthPath = path.join(home, "intellite", "intellite-oauth.mjs");
     await fs.appendFile(guidancePath, "\nCustom project note.\n", "utf8");
+    await fs.appendFile(aiEntryPointPath, "\nCustom AI implementation note.\n", "utf8");
     await fs.appendFile(oauthPath, "\n// Custom OAuth integration note.\n", "utf8");
     await fs.rm(path.join(home, ".intellite", "guidance-lock.json"), { force: true });
 
@@ -567,6 +603,10 @@ test("app refresh does not overwrite user-edited guidance files", async () => {
     assert.equal(guidanceResult.status, "conflict");
     assert.match(await fs.readFile(guidancePath, "utf8"), /Custom project note/);
     assert.match(await fs.readFile(path.join(home, guidanceResult.newPath), "utf8"), /Intellite App Agent Guidance/);
+    const aiEntryPointResult = body.guidance.files.find((file) => file.path === ".intellite/IMPLEMENT_INTELLITE.md");
+    assert.equal(aiEntryPointResult.status, "conflict");
+    assert.match(await fs.readFile(aiEntryPointPath, "utf8"), /Custom AI implementation note/);
+    assert.match(await fs.readFile(path.join(home, aiEntryPointResult.newPath), "utf8"), /Implement Intellite in This Existing App/);
     const oauthResult = body.guidance.files.find((file) => file.path === "intellite/intellite-oauth.mjs");
     assert.equal(oauthResult.status, "conflict");
     assert.match(await fs.readFile(oauthPath, "utf8"), /Custom OAuth integration note/);
