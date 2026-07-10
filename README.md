@@ -111,6 +111,18 @@ npx intellite --env staging app request-production-review intellite.app.json
 
 `app adopt` is for an existing business application. It detects common frameworks and existing API route candidates, creates a project-specific manifest, and generates `intellite/intellite-proxy.mjs`. Detected business routes are written to `.intellite/adoption-report.json` for review and are never exposed automatically. Only the read-only usage-guide route is placed in the initial manifest.
 
+It also generates `intellite/intellite-oauth.mjs` and exact callback URLs for the standard existing-app connection flow. The app keeps its current login, sessions, users, tenants, roles, and APIs. Intellite OAuth Authorization Code + PKCE is used only to link a logged-in local actor to stable Intellite user and organization IDs. It must not auto-link by email. The optional `login` handoff succeeds only when the app resolves an active pre-existing stable-ID mapping.
+
+An existing-app integration is ready only after the app supplies:
+
+- a durable, atomic OAuth transaction store for state and the PKCE verifier;
+- unique local tenant and user mappings for Intellite organization and user IDs;
+- a route that calls `authorizeIntelliteProxyRequest` with the app's authoritative mapping lookups and role/ACL check;
+- durable JTI consumption for state-changing routes;
+- app-side audit records for the resolved local actor, target, capability, and result.
+
+The final permission is always the intersection of the requested capability, the current Intellite grant, and the existing app role/ACL. Missing or disabled mappings fail closed. The generated adapters never create app users, change roles, run migrations, install dependencies, edit routes, modify environment variables, or deploy the app.
+
 - `resources`: typed objects the assistant can refer to with stable `intellite://apps/...` references.
 - `actions`: callable operations with capability, risk, and approval metadata. `external_send` and `destructive` actions must require `confirm` or `admin`.
 - `events`: app-emitted lifecycle or business events tied to resources.
@@ -119,9 +131,11 @@ If a skill package has no signature, local validation reports a warning. Intelli
 
 `app refresh` updates `.intellite/agent-guidance.md` and `.intellite/examples/` from the current CLI templates. Files that still match the last generated hash are updated in place. User-edited files are not overwritten; the new version is written next to them as `.new`.
 
-`app doctor` runs manifest validation, conformance checks, sample-value readiness checks, guidance freshness checks, and source-level implementation checks for proxy verification, usage-guide routing, capability enforcement, and durable replay handling. It no longer reports success when only a manifest exists. Runtime readiness is reported separately from the latest staging `app probe` result.
+`app doctor` runs manifest validation, conformance checks, sample-value readiness checks, guidance freshness checks, and source-level implementation checks for OAuth route integration, proxy verification, stable-ID mapping, existing-app role/ACL enforcement, usage-guide routing, capability enforcement, and durable replay handling. Generated adapter files are excluded from implementation evidence, so their presence alone cannot make the doctor pass. Runtime readiness is reported separately from the latest staging `app probe` result.
 
 External apps verify `X-Intellite-Proxy-*` with ES256 and Intellite's public JWKS. They do not receive or configure a shared signing secret. Existing first-party apps keep the HMAC contract for compatibility. The generated verifier uses Web Crypto and runs in Node.js, Next.js server routes, Hono, and Cloudflare Workers. State-changing routes must provide an atomic durable `replayStore.consume` implementation.
+
+OAuth connection access tokens are short-lived server-side evidence, not replacements for app sessions. Revoke them after committing the stable-ID mapping unless immediate server-side revalidation is required. Normal AI/CLI requests use fresh signed app-call tickets and are checked against current Intellite grants plus the app's current role/ACL.
 
 Production publishing requires Intellite review. Pending production manifests, environments, and skill packages are kept out of runtime resolution until approved.
 
