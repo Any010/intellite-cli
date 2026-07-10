@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { generateKeyPairSync, webcrypto } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // All tests run the CLI as a subprocess with HOME/USERPROFILE pointed at a
 // throwaway directory, so nothing touches the real ~/.intellite. Every test
@@ -94,6 +95,8 @@ test("help command prints usage and exits 0", async () => {
     assert.match(result.stdout, /api METHOD PATH/);
     assert.match(result.stdout, /download PATH \[--output FILE\]/);
     assert.match(result.stdout, /app request-production-review \[FILE\]/);
+    assert.match(result.stdout, /app adopt/);
+    assert.match(result.stdout, /app probe/);
     assert.match(result.stdout, /--env production\|staging/);
     assert.match(result.stdout, /INTELLITE_AGENT_SKILLS_DIRS/);
     assert.match(result.stdout, /INTELLITE_TOKEN_STORE/);
@@ -127,10 +130,12 @@ test("app help prints developer app commands", async () => {
     assert.equal(result.code, 0);
     assert.match(result.stdout, /intellite app/);
     assert.match(result.stdout, /app init/);
+    assert.match(result.stdout, /app adopt/);
     assert.match(result.stdout, /app validate/);
     assert.match(result.stdout, /app conformance/);
     assert.match(result.stdout, /app refresh/);
     assert.match(result.stdout, /app doctor/);
+    assert.match(result.stdout, /app probe/);
     assert.match(result.stdout, /app publish \[FILE\] --app-env staging/);
     assert.match(result.stdout, /app request-production-review \[FILE\]/);
   });
@@ -153,13 +158,17 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
     const usageGuideExamplePath = path.join(home, ".intellite", "examples", "usage-guide.md");
     const signatureExamplePath = path.join(home, ".intellite", "examples", "proxy-signature-verification.md");
+    const verifierPath = path.join(home, "intellite", "intellite-proxy.mjs");
     const lockPath = path.join(home, ".intellite", "guidance-lock.json");
     assert.match(await fs.readFile(guidancePath, "utf8"), /Intellite App Agent Guidance/);
     assert.match(await fs.readFile(usageGuideExamplePath, "utf8"), /Usage Guide Endpoint Example/);
     const signatureExample = await fs.readFile(signatureExamplePath, "utf8");
     assert.match(signatureExample, /Intellite Proxy Signature Verification Example/);
     assert.match(signatureExample, /X-Intellite-Proxy-Signature/);
-    assert.match(signatureExample, /intellite-app-proxy/);
+    assert.match(signatureExample, /ES256/);
+    const verifier = await fs.readFile(verifierPath, "utf8");
+    assert.match(verifier, /verifyIntelliteProxyRequest/);
+    assert.match(verifier, /intellite-app-proxy/);
     assert.equal(JSON.parse(await fs.readFile(lockPath, "utf8")).kind, "app-guidance");
     assert.equal(await fileExists(path.join(home, ".codex")), false, "app init must not install global Codex skills");
 
@@ -184,11 +193,121 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     await fs.writeFile(manifestPath, JSON.stringify(readyManifest, null, 2), "utf8");
     const refresh = await runCli(["app", "refresh", manifestPath], { home });
     assert.equal(refresh.code, 0);
+    await fs.mkdir(path.join(home, "src"), { recursive: true });
+    await fs.writeFile(path.join(home, "src", "intellite-route.mjs"), `
+import { verifyIntelliteProxyRequest } from "../intellite/intellite-proxy.mjs";
+export async function usageGuide(request) {
+  await verifyIntelliteProxyRequest(request, { requiredCapability: "acme-workflow.read", jwksUrl: process.env.INTELLITE_JWKS_URL });
+  return new Response("usage-guide");
+}
+`, "utf8");
     const doctor = await runCli(["app", "doctor", manifestPath], { home });
     assert.equal(doctor.code, 0);
     const doctorBody = JSON.parse(doctor.stdout);
     assert.equal(doctorBody.ok, true);
-    assert.match(JSON.stringify(doctorBody.manualChecks), /X-Intellite-Proxy/);
+    assert.equal(doctorBody.localReady, true);
+    assert.equal(doctorBody.runtimeReady, false);
+    assert.match(JSON.stringify(doctorBody.implementationEvidenceFiles), /src\/intellite-route.mjs/);
+  });
+});
+
+test("app adopt detects an existing framework without exposing detected business routes", async () => {
+  await withTempHome(async (home) => {
+    await fs.writeFile(path.join(home, "package.json"), JSON.stringify({
+      name: "@acme/order-console",
+      dependencies: { express: "^4.0.0" }
+    }), "utf8");
+    await fs.mkdir(path.join(home, "src"), { recursive: true });
+    await fs.writeFile(path.join(home, "src", "app.js"), `
+app.get("/api/orders", listOrders);
+app.post("/api/orders", createOrder);
+`, "utf8");
+
+    const manifestPath = path.join(home, "intellite.app.json");
+    const adopt = await runCli([
+      "app", "adopt",
+      "--output", manifestPath,
+      "--staging-url", "https://staging.orders.example.net",
+      "--production-url", "https://orders.example.net"
+    ], { home });
+    assert.equal(adopt.code, 0);
+    const body = JSON.parse(adopt.stdout);
+    assert.equal(body.appId, "order-console");
+    assert.equal(body.framework, "express");
+    assert.equal(body.routeCandidateCount, 2);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    assert.equal(manifest.proxyRoutes.length, 1);
+    assert.equal(manifest.proxyRoutes[0].routeId, "usage-guide-read");
+    const report = JSON.parse(await fs.readFile(path.join(home, ".intellite", "adoption-report.json"), "utf8"));
+    assert.equal(report.automaticExposure.length, 0);
+    assert.deepEqual(report.routeCandidates.map((route) => route.path).sort(), ["/api/orders", "/api/orders"]);
+  });
+});
+
+test("generated external app verifier accepts valid ES256 and rejects tampering", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "intellite.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const verifierPath = path.join(home, "intellite", "intellite-proxy.mjs");
+    const verifier = await import(`${pathToFileURL(verifierPath).href}?test=${Date.now()}`);
+
+    const { privateKey, publicKey } = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const privateJwk = privateKey.export({ format: "jwk" });
+    const publicJwk = { ...publicKey.export({ format: "jwk" }), kid: "test-key", alg: "ES256", use: "sig", key_ops: ["verify"] };
+    const signingKey = await webcrypto.subtle.importKey("jwk", privateJwk, { name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    const now = Math.floor(Date.now() / 1000);
+    const url = "https://app.example/api/usage-guide";
+    const bodySha256 = Buffer.from(await webcrypto.subtle.digest("SHA-256", new Uint8Array())).toString("base64url");
+    const claims = Buffer.from(JSON.stringify({
+      aud: "intellite-app-proxy",
+      appId: "example-workflow",
+      routeId: "usage-guide-read",
+      method: "GET",
+      path: "/api/usage-guide",
+      query: "",
+      jti: "abcdefghijklmnop",
+      iat: now,
+      exp: now + 300,
+      userId: "user-1",
+      userEmail: "user@example.com",
+      orgId: "org-1",
+      capabilities: ["example-workflow.read"]
+    })).toString("base64url");
+    const payload = [String(now), "GET", "/api/usage-guide", "", bodySha256, claims].join("\n");
+    const signature = Buffer.from(await webcrypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, signingKey, new TextEncoder().encode(payload))).toString("base64url");
+    const headers = {
+      "X-Intellite-Proxy-Algorithm": "ES256",
+      "X-Intellite-Proxy-Key-Id": "test-key",
+      "X-Intellite-Proxy-Timestamp": String(now),
+      "X-Intellite-Proxy-Body-Sha256": bodySha256,
+      "X-Intellite-Proxy-Claims": claims,
+      "X-Intellite-Proxy-Signature": signature
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ keys: [publicJwk] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    try {
+      const actor = await verifier.verifyIntelliteProxyRequest(new Request(url, { headers }), {
+        appId: "example-workflow",
+        jwksUrl: "https://intellite.example/.well-known/intellite-app-proxy-jwks.json",
+        requiredCapability: "example-workflow.read"
+      });
+      assert.equal(actor.userId, "user-1");
+      assert.equal(actor.orgId, "org-1");
+
+      await assert.rejects(
+        verifier.verifyIntelliteProxyRequest(new Request(url, {
+          headers: { ...headers, "X-Intellite-Proxy-Signature": `A${signature.slice(1)}` }
+        }), {
+          appId: "example-workflow",
+          jwksUrl: "https://intellite.example/.well-known/intellite-app-proxy-jwks.json",
+          requiredCapability: "example-workflow.read"
+        }),
+        /invalid Intellite proxy signature/
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
 
@@ -258,6 +377,26 @@ test("app validate rejects root catch-all routes", async () => {
   });
 });
 
+test("app validate rejects platform-managed environment fields", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "managed-fields.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
+    manifest.environments.staging.serviceBinding = "RPA_BOX_API";
+    manifest.environments.staging.proxySecretName = "INTELLITE_APP_PROXY_SECRET_RPA_BOX";
+    manifest.environments.staging.identityForwarding = "signed_pages_email";
+    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+    const validate = await runCli(["app", "validate", manifestPath], { home });
+    assert.equal(validate.code, 1);
+    const body = JSON.parse(validate.stdout);
+    assert.match(JSON.stringify(body.errors), /serviceBinding is platform-managed/);
+    assert.match(JSON.stringify(body.errors), /proxySecretName is platform-managed/);
+    assert.match(JSON.stringify(body.errors), /identityForwarding is platform-managed/);
+  });
+});
+
 test("app validate rejects proxy route patterns that the server rejects for regex safety", async () => {
   await withTempHome(async (home) => {
     const manifestPath = path.join(home, "unsafe-regex.app.json");
@@ -300,6 +439,7 @@ test("app call tickets preserve identity headers without forwarding internal ser
   assert.match(cli, /"x-pages-identity-signature"/);
   assert.doesNotMatch(cli, /"x-rpa-internal-api-call"/);
   assert.doesNotMatch(cli, /"x-rpa-internal-user-email"/);
+  assert.match(cli, /\/api\/organization\/developer\/apps\/probe/);
 });
 
 test("no command prints usage and exits 0", async () => {

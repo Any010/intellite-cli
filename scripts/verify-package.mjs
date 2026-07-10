@@ -112,6 +112,8 @@ if (!cli.includes("config.staging.json")) fail("CLI must separate staging config
 if (!cli.includes("skills-staging")) fail("CLI must separate staging skills from production skills.");
 if (!cli.includes("agent context")) fail("CLI must expose the current local agent context command.");
 if (!cli.includes("app request-production-review")) fail("CLI must expose the production review request command.");
+if (!cli.includes("app adopt")) fail("CLI must expose the existing-app adoption command.");
+if (!cli.includes("app probe")) fail("CLI must expose the signed runtime probe command.");
 if (!cli.includes("app refresh [FILE]")) fail("CLI must expose the project-local guidance refresh command.");
 if (!cli.includes("app doctor [FILE]")) fail("CLI must expose the local app doctor command.");
 if (!cli.includes("schemaVersion: 2")) fail("CLI app init must scaffold the current manifest schema.");
@@ -120,6 +122,10 @@ if (!cli.includes("guidance-lock.json")) fail("CLI must track generated guidance
 if (!cli.includes("Do not install it into global skill directories")) fail("CLI guidance must be project-local, not global skill sync.");
 if (!cli.includes("unsafeProxyPathPatternReason")) fail("CLI must mirror server-side proxy regex safety checks.");
 if (!cli.includes("project-values:replace-sample-app-id")) fail("CLI doctor must reject unedited app init sample values.");
+if (!cli.includes("implementation:proxy-verifier-integrated")) fail("CLI doctor must inspect app-side proxy verification integration.");
+if (!cli.includes("/api/organization/developer/apps/probe")) fail("CLI probe must use the authoritative server-side runtime probe.");
+if (!cli.includes("X-Intellite-Proxy-Algorithm")) fail("CLI guidance must use the external app signature algorithm contract.");
+if (!cli.includes("ES256")) fail("CLI must generate ES256 verification guidance for external apps.");
 if (!cli.includes("manifest.resources")) fail("CLI manifest validator must support schema v2 resources.");
 if (!cli.includes("manifest.actions")) fail("CLI manifest validator must support schema v2 actions.");
 if (!cli.includes("manifest.events")) fail("CLI manifest validator must support schema v2 events.");

@@ -56,11 +56,13 @@ npx intellite skills
 npx intellite api GET /api/intellite/status
 npx intellite download /api/example/file --output output.bin
 npx intellite app init --output intellite.app.json
+npx intellite app adopt --app-id my-business-app --name "My Business App" --staging-url https://staging.example.com --production-url https://example.com
 npx intellite app validate intellite.app.json
 npx intellite app conformance intellite.app.json
 npx intellite app refresh intellite.app.json
 npx intellite app doctor intellite.app.json
 npx intellite --env staging app publish intellite.app.json --app-env staging
+npx intellite --env staging app probe intellite.app.json
 npx intellite --env staging app list
 npx intellite --env staging app request-production-review intellite.app.json
 npx intellite logout
@@ -92,17 +94,22 @@ The public CLI includes the developer app workflow:
 
 ```bash
 npx intellite app init --output intellite.app.json
+npx intellite app adopt --app-id my-business-app --name "My Business App" --staging-url https://staging.example.com --production-url https://example.com
 npx intellite app validate intellite.app.json
 npx intellite app conformance intellite.app.json
+npx intellite app doctor intellite.app.json
 npx intellite --env staging app publish intellite.app.json --app-env staging
+npx intellite --env staging app probe intellite.app.json
 npx intellite --env staging app list
 npx intellite --env staging app request-production-review intellite.app.json
 ```
 
-`init`, `validate`, `conformance`, `refresh`, and `doctor` are local checks. `publish --app-env staging` sends a validated manifest to the selected Intellite environment and registers the app for the signed-in organization. `request-production-review` stores a production manifest as pending review; it is not active until platform approval. Production publication is intentionally not self-service.
+`init`, `adopt`, `validate`, `conformance`, `refresh`, and `doctor` are local commands. `publish --app-env staging` sends a validated manifest to the selected Intellite environment and registers the app for the signed-in organization. `probe` uses a real signed app-call ticket and succeeds only when the app rejects unsigned and tampered calls while accepting the valid signed call. `request-production-review` requires a current successful staging probe and stores a production manifest as pending review; it is not active until platform approval. Production publication is intentionally not self-service.
 `app list` shows the manifest versions and environments registered for the signed-in developer organization.
 
 `app init` scaffolds the current `schemaVersion: 2` manifest and project-local AI guidance under `.intellite/`. It does not write global skills or touch `~/.codex/skills`. The generated manifest contains sample app ID and sample URLs; replace them before running `app doctor`, `app publish`, or `app request-production-review`. In addition to capabilities, roles, environments, proxy routes, and skills, v2 manifests can declare:
+
+`app adopt` is for an existing business application. It detects common frameworks and existing API route candidates, creates a project-specific manifest, and generates `intellite/intellite-proxy.mjs`. Detected business routes are written to `.intellite/adoption-report.json` for review and are never exposed automatically. Only the read-only usage-guide route is placed in the initial manifest.
 
 - `resources`: typed objects the assistant can refer to with stable `intellite://apps/...` references.
 - `actions`: callable operations with capability, risk, and approval metadata. `external_send` and `destructive` actions must require `confirm` or `admin`.
@@ -112,14 +119,9 @@ If a skill package has no signature, local validation reports a warning. Intelli
 
 `app refresh` updates `.intellite/agent-guidance.md` and `.intellite/examples/` from the current CLI templates. Files that still match the last generated hash are updated in place. User-edited files are not overwritten; the new version is written next to them as `.new`.
 
-`app doctor` runs manifest validation, conformance checks, sample-value readiness checks, and project-local guidance freshness checks. It also reports manual implementation checks such as `X-Intellite-Proxy-*` signature verification.
+`app doctor` runs manifest validation, conformance checks, sample-value readiness checks, guidance freshness checks, and source-level implementation checks for proxy verification, usage-guide routing, capability enforcement, and durable replay handling. It no longer reports success when only a manifest exists. Runtime readiness is reported separately from the latest staging `app probe` result.
 
-Planned additional SDK commands:
-
-```bash
-npx intellite app dev-link --env staging
-npx intellite app agent-test --env staging
-```
+External apps verify `X-Intellite-Proxy-*` with ES256 and Intellite's public JWKS. They do not receive or configure a shared signing secret. Existing first-party apps keep the HMAC contract for compatibility. The generated verifier uses Web Crypto and runs in Node.js, Next.js server routes, Hono, and Cloudflare Workers. State-changing routes must provide an atomic durable `replayStore.consume` implementation.
 
 Production publishing requires Intellite review. Pending production manifests, environments, and skill packages are kept out of runtime resolution until approved.
 
