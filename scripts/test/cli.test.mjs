@@ -436,6 +436,19 @@ test("generated OAuth adapter uses server-side state, PKCE, narrow scope, revali
       }),
       /returnTo must be an app-relative path/
     );
+    await assert.rejects(
+      adapter.createIntelliteConnectionRequest({
+        issuer: "https://user:secret@intellite.example",
+        redirectUri: "https://app.example/api/auth/intellite/callback",
+        intent: "link",
+        capabilities: ["example-workflow.read"],
+        localUserId: "local-user-1",
+        localTenantId: "tenant-1",
+        transactionStore,
+        fetchImpl
+      }),
+      /unsafe Intellite issuer URL/
+    );
 
     const started = await adapter.createIntelliteConnectionRequest({
       issuer: "https://intellite.example",

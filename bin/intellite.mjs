@@ -690,8 +690,9 @@ function trustedUrl(value, label) {
   let url;
   try { url = new URL(String(value || "")); } catch { fail("invalid " + label, 503, "unsafe_configuration"); }
   const local = ["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  const authority = url.href.slice(url.protocol.length + 2).split(/[/?#]/, 1)[0];
   if (url.protocol !== "https:" && !(url.protocol === "http:" && local)) fail("unsafe " + label, 503, "unsafe_configuration");
-  if (url.username || url.password || url.hash) fail("unsafe " + label, 503, "unsafe_configuration");
+  if (authority.includes("@") || url.hash) fail("unsafe " + label, 503, "unsafe_configuration");
   return url;
 }
 
