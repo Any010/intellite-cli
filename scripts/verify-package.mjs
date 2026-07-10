@@ -62,6 +62,7 @@ function walk(dir) {
 }
 
 const packageJson = readJson("package.json");
+const packageLock = readJson("package-lock.json");
 
 for (const field of requiredPackageFields) {
   if (!(field in packageJson)) fail(`package.json is missing ${field}.`);
@@ -74,6 +75,9 @@ if (packageJson.repository?.url !== "git+https://github.com/Any010/intellite-cli
   fail("repository.url must match the GitHub repository used for npm trusted publishing.");
 }
 if (packageJson.publishConfig?.access !== "public") fail("publishConfig.access must be public.");
+if (packageLock.version !== packageJson.version || packageLock.packages?.[""]?.version !== packageJson.version) {
+  fail("package.json and package-lock.json versions must match.");
+}
 
 const files = walk(root).map((file) => path.relative(root, file).replace(/\\/g, "/"));
 for (const file of files) {
@@ -123,6 +127,12 @@ if (!cli.includes("Do not install it into global skill directories")) fail("CLI 
 if (!cli.includes("unsafeProxyPathPatternReason")) fail("CLI must mirror server-side proxy regex safety checks.");
 if (!cli.includes("project-values:replace-sample-app-id")) fail("CLI doctor must reject unedited app init sample values.");
 if (!cli.includes("implementation:proxy-verifier-integrated")) fail("CLI doctor must inspect app-side proxy verification integration.");
+if (!cli.includes("implementation:existing-app-role-acl")) fail("CLI doctor must require existing-app role and ACL integration.");
+if (!cli.includes("authorizeIntelliteProxyRequest")) fail("CLI must generate stable-ID mapping and existing-app ACL authorization.");
+if (!cli.includes("findOrganizationLink") || !cli.includes("findUserLink")) fail("CLI authorization adapter must require stable organization and user mappings.");
+if (!cli.includes("authorizeLocalAccess")) fail("CLI authorization adapter must require existing-app authorization.");
+if (!cli.includes('relativePath === "intellite/intellite-oauth.mjs"')) fail("CLI doctor must exclude generated OAuth code from implementation evidence.");
+if (!cli.includes("revocation_failed")) fail("CLI OAuth adapter must fail closed when revocation fails.");
 if (!cli.includes("/api/organization/developer/apps/probe")) fail("CLI probe must use the authoritative server-side runtime probe.");
 if (!cli.includes("X-Intellite-Proxy-Algorithm")) fail("CLI guidance must use the external app signature algorithm contract.");
 if (!cli.includes("ES256")) fail("CLI must generate ES256 verification guidance for external apps.");
@@ -135,5 +145,16 @@ if (cli.includes("\"x-rpa-internal-api-call\"") || cli.includes("\"x-rpa-interna
 if (cli.includes("command === \"quote\"") || cli.includes("command === \"evidence\"")) fail("Base Intellite CLI must not expose app-specific commands.");
 if (cli.includes("quote calculate") || cli.includes("quote create") || cli.includes("evidence create")) fail("Base Intellite CLI help must stay app-neutral.");
 if (JSON.stringify(packageJson.keywords ?? []).toLowerCase().includes("quote")) fail("package keywords must stay app-neutral.");
+
+const declaredVersion = cli.match(/const CLI_VERSION = "([^"]+)"/)?.[1] ?? "";
+if (declaredVersion !== packageJson.version) fail("CLI_VERSION must match package.json.");
+
+const readme = fs.readFileSync(path.join(root, "README.md"), "utf8");
+if (!readme.includes("keeps its current login, sessions, users, tenants, roles, and APIs")) {
+  fail("README must preserve the existing app authentication and authorization boundary.");
+}
+if (!readme.includes("Generated adapter files are excluded from implementation evidence")) {
+  fail("README must explain that generated files do not satisfy doctor integration checks.");
+}
 
 console.log("verify-package: ok");

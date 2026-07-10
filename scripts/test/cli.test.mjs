@@ -158,7 +158,9 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
     const usageGuideExamplePath = path.join(home, ".intellite", "examples", "usage-guide.md");
     const signatureExamplePath = path.join(home, ".intellite", "examples", "proxy-signature-verification.md");
+    const oauthExamplePath = path.join(home, ".intellite", "examples", "oauth-connection.md");
     const verifierPath = path.join(home, "intellite", "intellite-proxy.mjs");
+    const oauthPath = path.join(home, "intellite", "intellite-oauth.mjs");
     const lockPath = path.join(home, ".intellite", "guidance-lock.json");
     assert.match(await fs.readFile(guidancePath, "utf8"), /Intellite App Agent Guidance/);
     assert.match(await fs.readFile(usageGuideExamplePath, "utf8"), /Usage Guide Endpoint Example/);
@@ -166,9 +168,13 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     assert.match(signatureExample, /Intellite Proxy Signature Verification Example/);
     assert.match(signatureExample, /X-Intellite-Proxy-Signature/);
     assert.match(signatureExample, /ES256/);
+    assert.match(await fs.readFile(oauthExamplePath, "utf8"), /Existing-App OAuth Connection/);
     const verifier = await fs.readFile(verifierPath, "utf8");
     assert.match(verifier, /verifyIntelliteProxyRequest/);
     assert.match(verifier, /intellite-app-proxy/);
+    const oauthAdapter = await fs.readFile(oauthPath, "utf8");
+    assert.match(oauthAdapter, /createIntelliteConnectionRequest/);
+    assert.match(oauthAdapter, /completeIntelliteConnectionCallback/);
     assert.equal(JSON.parse(await fs.readFile(lockPath, "utf8")).kind, "app-guidance");
     assert.equal(await fileExists(path.join(home, ".codex")), false, "app init must not install global Codex skills");
 
@@ -193,12 +199,30 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     await fs.writeFile(manifestPath, JSON.stringify(readyManifest, null, 2), "utf8");
     const refresh = await runCli(["app", "refresh", manifestPath], { home });
     assert.equal(refresh.code, 0);
+    const generatedOnlyDoctor = await runCli(["app", "doctor", manifestPath], { home });
+    assert.equal(generatedOnlyDoctor.code, 1);
+    assert.match(JSON.stringify(JSON.parse(generatedOnlyDoctor.stdout).checks), /implementation:oauth-connection/);
     await fs.mkdir(path.join(home, "src"), { recursive: true });
     await fs.writeFile(path.join(home, "src", "intellite-route.mjs"), `
-import { verifyIntelliteProxyRequest } from "../intellite/intellite-proxy.mjs";
+import { authorizeIntelliteProxyRequest } from "../intellite/intellite-proxy.mjs";
+import { createIntelliteConnectionRequest, completeIntelliteConnectionCallback } from "../intellite/intellite-oauth.mjs";
+const transactionStore = { async create() { return true; }, async consume() { return null; } };
+const connectionStore = {
+  async findOrganizationLink() { return { status: "active", localTenantId: "tenant-1" }; },
+  async findUserLink() { return { status: "active", localTenantId: "tenant-1", localUserId: "user-1" }; }
+};
 export async function usageGuide(request) {
-  await verifyIntelliteProxyRequest(request, { requiredCapability: "acme-workflow.read", jwksUrl: process.env.INTELLITE_JWKS_URL });
+  await authorizeIntelliteProxyRequest(request, {
+    requiredCapability: "acme-workflow.read",
+    jwksUrl: process.env.INTELLITE_JWKS_URL,
+    connectionStore,
+    authorizeLocalAccess: async () => true
+  });
   return new Response("usage-guide");
+}
+export async function connect(options) { return createIntelliteConnectionRequest({ ...options, transactionStore }); }
+export async function callback(options) {
+  return completeIntelliteConnectionCallback({ ...options, transactionStore, authorizeLocalActor: async () => true });
 }
 `, "utf8");
     const doctor = await runCli(["app", "doctor", manifestPath], { home });
@@ -238,6 +262,8 @@ app.post("/api/orders", createOrder);
     const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
     assert.equal(manifest.proxyRoutes.length, 1);
     assert.equal(manifest.proxyRoutes[0].routeId, "usage-guide-read");
+    assert.equal(manifest.environments.production.oauthRedirectUris[0], "https://orders.example.net/api/auth/intellite/callback");
+    assert.match(await fs.readFile(path.join(home, "intellite", "intellite-oauth.mjs"), "utf8"), /transactionStore/);
     const report = JSON.parse(await fs.readFile(path.join(home, ".intellite", "adoption-report.json"), "utf8"));
     assert.equal(report.automaticExposure.length, 0);
     assert.deepEqual(report.routeCandidates.map((route) => route.path).sort(), ["/api/orders", "/api/orders"]);
@@ -295,6 +321,41 @@ test("generated external app verifier accepts valid ES256 and rejects tampering"
       assert.equal(actor.userId, "user-1");
       assert.equal(actor.orgId, "org-1");
 
+      const authorized = await verifier.authorizeIntelliteProxyRequest(new Request(url, { headers }), {
+        appId: "example-workflow",
+        jwksUrl: "https://intellite.example/.well-known/intellite-app-proxy-jwks.json",
+        requiredCapability: "example-workflow.read",
+        connectionStore: {
+          async findOrganizationLink({ intelliteOrgId }) {
+            assert.equal(intelliteOrgId, "org-1");
+            return { status: "active", localTenantId: "tenant-1" };
+          },
+          async findUserLink({ intelliteUserId, localTenantId }) {
+            assert.equal(intelliteUserId, "user-1");
+            assert.equal(localTenantId, "tenant-1");
+            return { status: "active", localTenantId, localUserId: "local-user-1" };
+          }
+        },
+        authorizeLocalAccess: async ({ localTenantId, localUserId, requiredCapability }) =>
+          localTenantId === "tenant-1" && localUserId === "local-user-1" && requiredCapability === "example-workflow.read"
+      });
+      assert.equal(authorized.localTenantId, "tenant-1");
+      assert.equal(authorized.localUserId, "local-user-1");
+
+      await assert.rejects(
+        verifier.authorizeIntelliteProxyRequest(new Request(url, { headers }), {
+          appId: "example-workflow",
+          jwksUrl: "https://intellite.example/.well-known/intellite-app-proxy-jwks.json",
+          requiredCapability: "example-workflow.read",
+          connectionStore: {
+            async findOrganizationLink() { return { status: "active", localTenantId: "tenant-1" }; },
+            async findUserLink() { return { status: "active", localTenantId: "tenant-1", localUserId: "local-user-1" }; }
+          },
+          authorizeLocalAccess: async () => false
+        }),
+        /existing-app role or ACL denied/
+      );
+
       await assert.rejects(
         verifier.verifyIntelliteProxyRequest(new Request(url, {
           headers: { ...headers, "X-Intellite-Proxy-Signature": `A${signature.slice(1)}` }
@@ -311,6 +372,167 @@ test("generated external app verifier accepts valid ES256 and rejects tampering"
   });
 });
 
+test("generated OAuth adapter uses server-side state, PKCE, narrow scope, revalidation, and one-time consumption", async () => {
+  await withTempHome(async (home) => {
+    const manifestPath = path.join(home, "intellite.app.json");
+    const init = await runCli(["app", "init", "--output", manifestPath], { home });
+    assert.equal(init.code, 0);
+    const adapter = await import(`${pathToFileURL(path.join(home, "intellite", "intellite-oauth.mjs")).href}?test=${Date.now()}`);
+    let transaction;
+    let consumed = false;
+    const transactionStore = {
+      async create(value) { transaction = value; return true; },
+      async consume({ stateHash }) {
+        if (consumed || stateHash !== transaction?.stateHash) return null;
+        consumed = true;
+        return transaction;
+      }
+    };
+    const calls = [];
+    let userinfoIntent = "link";
+    const fetchImpl = async (url, options = {}) => {
+      calls.push({ url: String(url), options });
+      if (String(url).endsWith("/.well-known/oauth-authorization-server")) {
+        return new Response(JSON.stringify({
+          issuer: "https://intellite.example",
+          authorization_endpoint: "https://intellite.example/oauth/authorize",
+          token_endpoint: "https://intellite.example/oauth/token",
+          userinfo_endpoint: "https://intellite.example/oauth/userinfo",
+          revocation_endpoint: "https://intellite.example/oauth/revoke"
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (String(url).endsWith("/oauth/token")) {
+        return new Response(JSON.stringify({ access_token: "token-value", token_type: "Bearer", expires_in: 600 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (String(url).endsWith("/oauth/userinfo")) {
+        return new Response(JSON.stringify({
+          sub: "intellite-user-1",
+          name: "User",
+          email: "user@example.com",
+          client_id: "example-workflow",
+          capabilities: ["example-workflow.read"],
+          intellite_intent: userinfoIntent,
+          org: { id: "org-1", name: "Org", role: "partner" },
+          membership: { role: "member" }
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(null, { status: 200 });
+    };
+
+    await assert.rejects(
+      adapter.createIntelliteConnectionRequest({
+        issuer: "https://intellite.example",
+        redirectUri: "https://app.example/api/auth/intellite/callback",
+        intent: "link",
+        capabilities: ["example-workflow.read"],
+        localUserId: "local-user-1",
+        localTenantId: "tenant-1",
+        returnTo: "https://attacker.example",
+        transactionStore,
+        fetchImpl
+      }),
+      /returnTo must be an app-relative path/
+    );
+
+    const started = await adapter.createIntelliteConnectionRequest({
+      issuer: "https://intellite.example",
+      redirectUri: "https://app.example/api/auth/intellite/callback",
+      intent: "link",
+      capabilities: ["example-workflow.read"],
+      localUserId: "local-user-1",
+      localTenantId: "tenant-1",
+      transactionStore,
+      fetchImpl
+    });
+    const authorizationUrl = new URL(started.authorizationUrl);
+    assert.equal(authorizationUrl.searchParams.get("intellite_intent"), "link");
+    assert.equal(authorizationUrl.searchParams.get("scope"), "example-workflow.read");
+    assert.equal(authorizationUrl.searchParams.get("code_challenge_method"), "S256");
+    assert.equal(transaction.localUserId, "local-user-1");
+    assert.equal(authorizationUrl.searchParams.has("localUserId"), false);
+    assert.equal(authorizationUrl.searchParams.has("code_verifier"), false);
+
+    const state = authorizationUrl.searchParams.get("state");
+    await assert.rejects(
+      adapter.completeIntelliteConnectionCallback({
+        callbackUrl: `https://app.example/api/auth/intellite/callback?code=code-value&state=tampered-${state}`,
+        transactionStore,
+        authorizeLocalActor: async () => true,
+        fetchImpl
+      }),
+      /invalid or replayed Intellite OAuth state/
+    );
+    const completed = await adapter.completeIntelliteConnectionCallback({
+      callbackUrl: `https://app.example/api/auth/intellite/callback?code=code-value&state=${state}`,
+      transactionStore,
+      authorizeLocalActor: async (stored) => stored.localUserId === "local-user-1" && stored.localTenantId === "tenant-1",
+      fetchImpl
+    });
+    assert.equal(completed.identity.intelliteUserId, "intellite-user-1");
+    assert.equal(completed.identity.intelliteOrgId, "org-1");
+    assert.deepEqual(completed.identity.capabilities, ["example-workflow.read"]);
+    assert.match(String(calls.find((call) => call.url.endsWith("/oauth/token"))?.options.body), /code_verifier=/);
+    await assert.rejects(
+      adapter.completeIntelliteConnectionCallback({
+        callbackUrl: `https://app.example/api/auth/intellite/callback?code=code-value&state=${state}`,
+        transactionStore,
+        authorizeLocalActor: async () => true,
+        fetchImpl
+      }),
+      /invalid or replayed Intellite OAuth state/
+    );
+
+    consumed = false;
+    userinfoIntent = "login";
+    const loginStarted = await adapter.createIntelliteConnectionRequest({
+      issuer: "https://intellite.example",
+      redirectUri: "https://app.example/api/auth/intellite/callback",
+      intent: "login",
+      capabilities: ["example-workflow.read"],
+      returnTo: "/dashboard",
+      transactionStore,
+      fetchImpl
+    });
+    const loginState = new URL(loginStarted.authorizationUrl).searchParams.get("state");
+    await assert.rejects(
+      adapter.completeIntelliteConnectionCallback({
+        callbackUrl: `https://app.example/api/auth/intellite/callback?code=login-code&state=${loginState}`,
+        transactionStore,
+        fetchImpl
+      }),
+      /existing login mapping resolver is required/
+    );
+
+    consumed = false;
+    const secondLogin = await adapter.createIntelliteConnectionRequest({
+      issuer: "https://intellite.example",
+      redirectUri: "https://app.example/api/auth/intellite/callback",
+      intent: "login",
+      capabilities: ["example-workflow.read"],
+      returnTo: "/dashboard",
+      transactionStore,
+      fetchImpl
+    });
+    const secondLoginState = new URL(secondLogin.authorizationUrl).searchParams.get("state");
+    const loginCompleted = await adapter.completeIntelliteConnectionCallback({
+      callbackUrl: `https://app.example/api/auth/intellite/callback?code=login-code&state=${secondLoginState}`,
+      transactionStore,
+      resolveExistingLoginMapping: async (identity) => ({
+        status: identity.intelliteUserId === "intellite-user-1" ? "active" : "missing",
+        localUserId: "local-user-1",
+        localTenantId: "tenant-1"
+      }),
+      fetchImpl
+    });
+    assert.equal(loginCompleted.transaction.localUserId, "local-user-1");
+    assert.equal(loginCompleted.transaction.localTenantId, "tenant-1");
+    assert.equal(loginCompleted.transaction.returnTo, "/dashboard");
+  });
+});
+
 test("app refresh does not overwrite user-edited guidance files", async () => {
   await withTempHome(async (home) => {
     const manifestPath = path.join(home, "intellite.app.json");
@@ -318,7 +540,9 @@ test("app refresh does not overwrite user-edited guidance files", async () => {
     assert.equal(init.code, 0);
 
     const guidancePath = path.join(home, ".intellite", "agent-guidance.md");
+    const oauthPath = path.join(home, "intellite", "intellite-oauth.mjs");
     await fs.appendFile(guidancePath, "\nCustom project note.\n", "utf8");
+    await fs.appendFile(oauthPath, "\n// Custom OAuth integration note.\n", "utf8");
     await fs.rm(path.join(home, ".intellite", "guidance-lock.json"), { force: true });
 
     const refresh = await runCli(["app", "refresh", manifestPath], { home });
@@ -328,6 +552,10 @@ test("app refresh does not overwrite user-edited guidance files", async () => {
     assert.equal(guidanceResult.status, "conflict");
     assert.match(await fs.readFile(guidancePath, "utf8"), /Custom project note/);
     assert.match(await fs.readFile(path.join(home, guidanceResult.newPath), "utf8"), /Intellite App Agent Guidance/);
+    const oauthResult = body.guidance.files.find((file) => file.path === "intellite/intellite-oauth.mjs");
+    assert.equal(oauthResult.status, "conflict");
+    assert.match(await fs.readFile(oauthPath, "utf8"), /Custom OAuth integration note/);
+    assert.match(await fs.readFile(path.join(home, oauthResult.newPath), "utf8"), /createIntelliteConnectionRequest/);
 
     const secondRefresh = await runCli(["app", "refresh", manifestPath], { home });
     assert.equal(secondRefresh.code, 0);
