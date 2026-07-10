@@ -44,16 +44,18 @@ let TOKEN_SERVICE = activeEnvironment.tokenService;
 let TOKEN_ACCOUNT = activeEnvironment.tokenAccount;
 let TOKEN_LABEL = activeEnvironment.tokenLabel;
 let DPAPI_TOKEN_FILE = path.join(CONFIG_DIR, activeEnvironment.dpapiTokenFileName);
-const CLI_VERSION = "0.4.1";
+const CLI_VERSION = "0.4.2";
 const DEFAULT_PERMISSIONS = [];
 const MAX_JSON_FILE_BYTES = 5 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const MAX_SKILLS = 20;
 const MAX_SKILL_FILES = 20;
 const MAX_SKILL_FILE_BYTES = 256 * 1024;
-const APP_GUIDANCE_VERSION = "2026-07-10.3";
+const APP_GUIDANCE_VERSION = "2026-07-10.4";
 const APP_GUIDANCE_DIR = ".intellite";
 const APP_GUIDANCE_LOCK_FILE = "guidance-lock.json";
+const APP_AI_ENTRYPOINT = ".intellite/IMPLEMENT_INTELLITE.md";
+const APP_REQUIREMENTS_FILE = ".intellite/integration-requirements.json";
 const APP_API_PREFIX = "/api/intellite/apps/";
 const APP_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,79}$/;
 const CAPABILITY_PATTERN = /^[a-z0-9][a-z0-9._:-]{0,159}$/;
@@ -1141,15 +1143,458 @@ export async function authorizeIntelliteProxyRequest(request, options = {}) {
 `;
 }
 
-function guidanceTemplates(manifest) {
+function integrationManualReviewItems() {
+  return [
+    {
+      id: "existing-auth-regression",
+      requirement: "Normal browser login, logout, session expiry, password reset, and existing SSO still work without Intellite."
+    },
+    {
+      id: "connection-ux",
+      requirement: "Settings UI shows disconnected, connecting, connected, permission-changed, expired, and error states with explicit connect and disconnect actions."
+    },
+    {
+      id: "authoritative-local-authorization",
+      requirement: "Every Intellite route resolves current local tenant/user mappings and the current app role or ACL from the production database."
+    },
+    {
+      id: "production-audit",
+      requirement: "Connect, deny, callback failure, disconnect, authorization denial, replay rejection, and business side effects produce app-owned audit records."
+    },
+    {
+      id: "migration-recovery",
+      requirement: "Forward migration, indexes, retention cleanup, backup impact, and recovery procedure are reviewed for the app's real database."
+    },
+    {
+      id: "real-environment-proof",
+      requirement: "Staging uses staging URLs, keys, database, and test accounts; production uses production-only values and passes an authoritative staging probe first."
+    }
+  ];
+}
+
+function integrationRequirementsObject(manifest) {
+  const normalized = recordValue(manifest) || {};
+  const appId = guidanceAppId(manifest);
+  const capabilities = (Array.isArray(normalized.capabilities) ? normalized.capabilities : [])
+    .map((item) => textValue(recordValue(item)?.id))
+    .filter(Boolean);
+  const proxyRoutes = (Array.isArray(normalized.proxyRoutes) ? normalized.proxyRoutes : [])
+    .map((item) => {
+      const route = recordValue(item) || {};
+      return {
+        routeId: textValue(route.routeId),
+        method: textValue(route.method || "*"),
+        publicPathPattern: textValue(route.publicPathPattern),
+        upstreamPathReplacement: textValue(route.upstreamPathReplacement),
+        capabilities: arrayText(route.capabilities)
+      };
+    });
+  return {
+    schemaVersion: 1,
+    guidanceVersion: APP_GUIDANCE_VERSION,
+    appId,
+    aiEntryPoint: APP_AI_ENTRYPOINT,
+    authorityBoundary: {
+      intellite: [
+        "Intellite account authentication",
+        "organization selection",
+        "app entitlement and capability grants",
+        "OAuth consent and short-lived connection evidence",
+        "signed app-call tickets and platform audit"
+      ],
+      existingApp: [
+        "browser login and session",
+        "local users, tenants, roles, and ACLs",
+        "business data and business rules",
+        "mapping persistence",
+        "business side effects and app audit"
+      ],
+      effectivePermission: "requested capability AND current Intellite grant AND current existing-app role or ACL"
+    },
+    forbiddenChanges: [
+      "Do not replace the existing app login or session.",
+      "Do not auto-link or authorize by email, display name, or unsigned headers.",
+      "Do not create users or elevate roles unless the product explicitly requires an app-owned, reviewed JIT flow.",
+      "Do not expose detected business routes automatically.",
+      "Do not share local, staging, and production URLs, databases, tokens, keys, or callback URIs.",
+      "Do not add mock, fail-open, local-only, or hidden no-op production behavior.",
+      "Do not edit generated Intellite files directly when an app-owned adapter or route can own the customization."
+    ],
+    currentManifest: {
+      capabilities,
+      proxyRoutes,
+      environments: APP_ENVIRONMENTS
+    },
+    requiredDeliverables: [
+      { id: "manifest", required: true, verification: ["app validate", "app conformance"], guide: APP_AI_ENTRYPOINT },
+      { id: "oauth-transaction-store", required: true, verification: ["atomic create", "single-use consume", "expiry", "encrypted verifier"], guide: ".intellite/examples/storage-and-audit.md" },
+      { id: "organization-mapping", required: true, verification: ["unique Intellite organization", "unique local tenant", "active status"], guide: ".intellite/examples/storage-and-audit.md" },
+      { id: "user-mapping", required: true, verification: ["stable IDs", "unique mapping", "no email authority", "active status"], guide: ".intellite/examples/storage-and-audit.md" },
+      { id: "connection-routes", required: true, verification: ["install or link start", "callback", "disconnect", "existing login unchanged"], guide: ".intellite/examples/framework-recipes.md" },
+      { id: "proxy-authorization", required: true, verification: ["ES256", "target and body hash", "capability", "mapping", "local ACL"], guide: ".intellite/examples/proxy-signature-verification.md" },
+      { id: "replay-store", required: true, verification: ["atomic JTI consume for writes", "retain through claim expiry"], guide: ".intellite/examples/storage-and-audit.md" },
+      { id: "usage-guide", required: true, verification: ["read-only route", "manifest route", "supported operations only"], guide: ".intellite/examples/usage-guide.md" },
+      { id: "connection-ux", required: true, verification: ["status", "connect", "disconnect", "retryable errors", "no destructive close semantics"], guide: APP_AI_ENTRYPOINT },
+      { id: "app-audit", required: true, verification: ["connection lifecycle", "denials", "side effects", "stable actor and target IDs"], guide: ".intellite/examples/storage-and-audit.md" },
+      { id: "regression-and-attack-tests", required: true, verification: ["OAuth attacks", "mapping conflicts", "ACL denial", "signature tampering", "replay", "existing auth regression"], guide: APP_AI_ENTRYPOINT },
+      { id: "staging-proof", required: true, verification: ["publish", "signed probe", "real app route", "separate environment"], guide: APP_AI_ENTRYPOINT }
+    ],
+    completionCommands: [
+      "npx intellite app validate intellite.app.json",
+      "npx intellite app conformance intellite.app.json",
+      "npx intellite app doctor intellite.app.json",
+      "npx intellite --env staging app publish intellite.app.json --app-env staging",
+      "npx intellite --env staging app probe intellite.app.json",
+      "npx intellite --env staging app request-production-review intellite.app.json"
+    ],
+    manualReviewRequired: integrationManualReviewItems()
+  };
+}
+
+function aiImplementationGuideTemplate(manifest) {
   const appId = guidanceAppId(manifest);
   return [
+    "<!-- intellite-app-guidance-version: " + APP_GUIDANCE_VERSION + " -->",
+    "# Implement Intellite in This Existing App",
+    "",
+    "This is the single entry point for an AI coding agent. Read this file, integration-requirements.json, adoption-report.json when present, intellite.app.json, and the existing app code before editing.",
+    "",
+    "Mission: make this app fully Intellite-compatible without replacing or weakening the app's existing authentication, users, tenants, roles, ACLs, business rules, database authority, or user experience.",
+    "",
+    "App ID: " + appId,
+    "",
+    "## Operating rules",
+    "",
+    "1. Inspect first. Identify the real framework, auth middleware, session source, tenant key, user key, role or ACL functions, database, migration system, API routes, audit facility, tests, staging deployment, and production deployment.",
+    "2. Preserve ownership. Intellite is the control plane; this app remains the business data plane and final business authorization authority.",
+    "3. Use stable Intellite organization and user IDs. Email and display names are display-only and never authorize linking, login, tenant selection, or role elevation.",
+    "4. Keep generated modules under intellite/ unchanged. Put framework glue, stores, routes, UI, migrations, and audit code in app-owned files.",
+    "5. Do not expose routeCandidates automatically. Review data sensitivity, method, capability, risk, approval, idempotency, and audit behavior for every route.",
+    "6. Fail closed. Missing mappings, current role, database, JWKS, signature, capability, replay store, OAuth state, PKCE verifier, environment config, or audit dependency must stop the operation with an actionable error.",
+    "7. Do not claim completion after scaffolding or local tests. Completion requires app doctor plus a real staging signed probe and the manual review items returned by app doctor.",
+    "",
+    "## Read in this order",
+    "",
+    "1. .intellite/integration-requirements.json",
+    "2. .intellite/adoption-report.json, when generated by app adopt",
+    "3. intellite.app.json",
+    "4. .intellite/examples/storage-and-audit.md",
+    "5. .intellite/examples/oauth-connection.md",
+    "6. .intellite/examples/proxy-signature-verification.md",
+    "7. .intellite/examples/framework-recipes.md",
+    "8. .intellite/examples/usage-guide.md",
+    "",
+    "## Phase 0: map the existing app",
+    "",
+    "Before editing, record the exact files and functions for:",
+    "",
+    "- current browser authentication and session lookup;",
+    "- tenant or workspace resolution;",
+    "- current user lookup and enabled state;",
+    "- role and resource-level ACL checks;",
+    "- database access, transactions, migrations, and retention jobs;",
+    "- audit logging and correlation IDs;",
+    "- API route registration and request body access;",
+    "- settings or integrations UI;",
+    "- unit, integration, browser, and deployment tests.",
+    "",
+    "If any authority is ambiguous, trace the runtime path and database before choosing an implementation. Do not invent a second source of truth.",
+    "",
+    "## Phase 1: make the manifest truthful",
+    "",
+    "- Replace sample URLs and confirm exact local, staging, and production origins and callback URIs.",
+    "- Define narrow capabilities around real business operations, not generic admin access.",
+    "- Map roles to the minimum capabilities they need.",
+    "- Add only reviewed proxy routes. Read routes and write routes need separate capability and risk decisions.",
+    "- Define resources, actions, and events only when the app actually implements and audits them.",
+    "- External send and destructive actions require confirm or admin approval.",
+    "- Keep the usage-guide route read-only.",
+    "",
+    "## Phase 2: add app-owned persistence",
+    "",
+    "Implement forward migrations through the app's existing migration system. Required semantics are documented in storage-and-audit.md:",
+    "",
+    "- OAuth transaction store with hashed state, encrypted PKCE verifier, local actor and tenant, intent, expiry, and atomic single-use consumption;",
+    "- one-to-one active organization mapping between Intellite organization ID and local tenant ID;",
+    "- active user mapping between Intellite user ID and local user ID within the mapped organization and tenant;",
+    "- durable JTI replay ledger for every state-changing signed request;",
+    "- app-owned audit events with stable actor, tenant, capability, target, result, and correlation fields.",
+    "",
+    "Do not let the CLI run the migration. Add it to the app's normal migration and recovery process, test it against a disposable test database, and verify indexes and cleanup.",
+    "",
+    "## Phase 3: add connection routes without replacing login",
+    "",
+    "Implement app-owned routes using intellite/intellite-oauth.mjs:",
+    "",
+    "- start install: current local tenant administrator starts an Intellite organization connection;",
+    "- start link: current logged-in local user starts personal account linking;",
+    "- callback: atomically consume state, re-check the current local actor, exchange code, validate stable IDs and capabilities, then commit mappings in one app-owned transaction;",
+    "- disconnect: require current local authorization, mark mapping inactive, revoke the short-lived token when present, and audit the result;",
+    "- optional login handoff: create an app session only after resolveExistingLoginMapping returns an active pre-existing mapping.",
+    "",
+    "Never put state records, PKCE verifier, local IDs, access tokens, or unrestricted return URLs in browser storage or unsigned query values.",
+    "",
+    "## Phase 4: authorize every Intellite API request",
+    "",
+    "In each Intellite-exposed route call authorizeIntelliteProxyRequest before reading or changing business data. Supply:",
+    "",
+    "- the exact app ID, JWKS URL, and route capability;",
+    "- a durable replayStore for writes;",
+    "- findOrganizationLink and findUserLink backed by the production app database;",
+    "- authorizeLocalAccess backed by the current app role and resource ACL.",
+    "",
+    "The effective permission is: requested capability AND current Intellite grant AND current existing-app role or ACL. A signed Intellite request never turns a local viewer into an editor or administrator.",
+    "",
+    "Perform business validation and side effects only after authorization and replay consumption. Use the app's normal transaction, idempotency, retry, and audit conventions.",
+    "",
+    "## Phase 5: implement the user experience",
+    "",
+    "Add an integrations surface consistent with the existing app. It must show:",
+    "",
+    "- disconnected: Connect Intellite;",
+    "- connecting: a stable pending state that survives navigation where appropriate;",
+    "- connected: Intellite account, organization, granted operations, connection time, and who connected it;",
+    "- permission changed or expired: explain that reconnection is required without silently broadening access;",
+    "- failed: actionable retry text without exposing code, token, state, verifier, or internal stack details;",
+    "- disconnect: a separate explicit action with confirmation; closing a dialog must not disconnect.",
+    "",
+    "Do not show an Intellite MFA status unless it is sourced authoritatively from Intellite. Do not duplicate the existing app's user or role editor.",
+    "",
+    "## Phase 6: app guidance, resources, actions, and events",
+    "",
+    "Implement GET /api/usage-guide using the app's real supported operations and constraints. It must not advertise unsupported writes or include secrets or customer examples.",
+    "",
+    "For each manifest action, verify that the path exists, the capability matches app enforcement, approval matches risk, idempotency is truthful, output is observable, and failure is audited. For each resource and event, use stable app-owned IDs and tenant boundaries.",
+    "",
+    "## Phase 7: tests that must exist",
+    "",
+    "OAuth and connection tests:",
+    "",
+    "- state tampering, replay, expiry, missing transaction, PKCE mismatch, redirect mismatch, intent mismatch, and reduced scope fail closed;",
+    "- install requires both current local tenant admin and Intellite organization admin;",
+    "- link requires the same current local user that started it;",
+    "- duplicate Intellite organization, local tenant, Intellite user, or local user mapping conflicts do not overwrite existing mappings;",
+    "- email equality never creates a mapping or login;",
+    "- disconnect is authorized, audited, and idempotent;",
+    "- existing login, logout, session expiry, password reset, and SSO remain unchanged.",
+    "",
+    "Signed request tests:",
+    "",
+    "- unsigned, stale, expired, wrong audience, wrong app, wrong method, wrong path, wrong query, wrong body hash, unknown key, bad signature, missing capability, missing mapping, disabled mapping, disabled local user, tenant mismatch, and local ACL denial all fail;",
+    "- duplicate write JTI is rejected atomically;",
+    "- successful reads and writes use the resolved local actor and tenant and create app audit records.",
+    "",
+    "Environment tests:",
+    "",
+    "- local, staging, and production never share databases, callback URLs, tokens, signing keys, or OAuth transactions;",
+    "- staging uses test accounts and test data;",
+    "- app refresh preserves edited app files and writes managed guidance conflicts to .new.",
+    "",
+    "## Phase 8: completion gates",
+    "",
+    "Run in order:",
+    "",
+    "    npx intellite app validate intellite.app.json",
+    "    npx intellite app conformance intellite.app.json",
+    "    npx intellite app doctor intellite.app.json",
+    "    npx intellite --env staging app publish intellite.app.json --app-env staging",
+    "    npx intellite --env staging app probe intellite.app.json",
+    "    npx intellite --env staging app request-production-review intellite.app.json",
+    "",
+    "Also run the app's full unit, integration, browser, migration, build, security, and deployment checks. app doctor is static evidence; app probe is runtime evidence. Neither replaces the manual review items in integration-requirements.json.",
+    "",
+    "## Required final report from the AI",
+    "",
+    "Do not finish with a proposal. Report:",
+    "",
+    "1. exact files and migrations changed;",
+    "2. existing auth, tenant, user, role, and business boundaries preserved;",
+    "3. capabilities and routes exposed, with risk and approval decisions;",
+    "4. mappings, replay, audit, disconnect, cleanup, and recovery implemented;",
+    "5. tests and attack cases executed with results;",
+    "6. staging publish and signed probe evidence;",
+    "7. any genuinely unresolved production dependency.",
+    "",
+    "If any required item is missing, state that the app is not yet fully Intellite-compatible."
+  ].join("\n") + "\n";
+}
+
+function storageAndAuditGuideTemplate() {
+  return [
+    "<!-- intellite-app-guidance-version: " + APP_GUIDANCE_VERSION + " -->",
+    "# Intellite Storage, Replay, and Audit Contract",
+    "",
+    "Use the existing app database and migration system. Names may follow local conventions, but these semantics are required.",
+    "",
+    "## OAuth transactions",
+    "",
+    "Required fields: state_hash primary or unique, encrypted PKCE verifier, app ID, intent, local actor ID, local tenant ID, exact redirect URI, app-relative return path, requested capabilities, expires_at, consumed_at, created_at.",
+    "",
+    "Create must reject duplicate state hashes. Consume must be one atomic database operation equivalent to:",
+    "",
+    "    UPDATE intellite_oauth_transactions",
+    "       SET consumed_at = current_timestamp",
+    "     WHERE state_hash = ?",
+    "       AND consumed_at IS NULL",
+    "       AND expires_at > current_timestamp",
+    "    RETURNING *;",
+    "",
+    "Never store raw state. Encrypt the PKCE verifier using the app's production secret-management pattern. Delete expired rows on a bounded scheduled job.",
+    "",
+    "## Organization links",
+    "",
+    "Required fields: Intellite organization ID, local tenant ID, status, linked_by_local_user_id, linked_at, disconnected_by_local_user_id, disconnected_at, updated_at.",
+    "",
+    "Enforce one active Intellite organization per local tenant and one active local tenant per Intellite organization. A conflict must stop and require an explicit administrator decision; never reassign automatically.",
+    "",
+    "## User links",
+    "",
+    "Required fields: Intellite organization ID, Intellite user ID, local tenant ID, local user ID, status, linked_at, disconnected_at, updated_at.",
+    "",
+    "Enforce unique active mappings in both directions within the organization and tenant. Re-check that the local user and membership are enabled on every request. Email is metadata only.",
+    "",
+    "## Replay ledger",
+    "",
+    "Required fields: JTI primary or unique, app ID, Intellite organization ID, Intellite user ID, method, path, expires_at, consumed_at.",
+    "",
+    "For every POST, PUT, PATCH, or DELETE, atomically insert or consume the JTI before business processing. Duplicate JTI must fail. Retain records until at least the signed claim expiry, then delete them in bounded batches.",
+    "",
+    "## App-owned audit",
+    "",
+    "Record at minimum:",
+    "",
+    "- occurred_at, action, result, reason, correlation_id, request_id;",
+    "- local tenant ID and local user ID;",
+    "- Intellite organization ID and Intellite user ID;",
+    "- app ID, capability, method, route, target type, and target ID;",
+    "- OAuth intent and connection status for connection events;",
+    "- idempotency key or JTI for state-changing operations;",
+    "- before and after references where local policy allows.",
+    "",
+    "Audit actions include connection started, approved, denied, callback failed, linked, mapping conflict, disconnected, signature rejected, replay rejected, capability denied, local ACL denied, business action succeeded, business action failed.",
+    "",
+    "Do not log access tokens, authorization codes, raw state, PKCE verifier, signing material, cookies, passwords, document contents, or unrestricted request bodies.",
+    "",
+    "## Transaction boundaries",
+    "",
+    "- Commit mapping rows and app audit together where the database supports it.",
+    "- For business writes, authorize first, consume replay atomically, validate business rules, write data, and write audit in one transaction where possible.",
+    "- External side effects require an app-owned idempotency ledger and honest pending, succeeded, failed, and retry states.",
+    "- Database unavailability, missing migration, or audit write failure must not silently downgrade authorization."
+  ].join("\n") + "\n";
+}
+
+function frameworkRecipesGuideTemplate(manifest) {
+  const appId = guidanceAppId(manifest);
+  return [
+    "<!-- intellite-app-guidance-version: " + APP_GUIDANCE_VERSION + " -->",
+    "# Framework Integration Recipes",
+    "",
+    "Read adoption-report.json to identify the detected framework and route candidates. These recipes define placement, not business authority.",
+    "",
+    "## Node.js, Next.js, Express, Fastify, Hono, and Cloudflare Workers",
+    "",
+    "Use the generated intellite/intellite-oauth.mjs and intellite/intellite-proxy.mjs from server-only code.",
+    "",
+    "Create app-owned modules for:",
+    "",
+    "- transactionStore backed by the real database;",
+    "- connectionStore backed by organization and user link tables;",
+    "- replayStore with atomic JTI consumption;",
+    "- authorizeLocalAccess using current local roles and resource ACLs;",
+    "- connection lifecycle and business audit writes.",
+    "",
+    "Next.js: place start, callback, disconnect, and usage-guide handlers in server route files. Resolve the existing authenticated session inside each handler. Never import adapters into client components.",
+    "",
+    "Express, Fastify: mount narrow routes through the existing auth and tenant middleware. Convert the request to a standards-compatible Request only at the adapter boundary and preserve raw body bytes for signature verification.",
+    "",
+    "Hono and Cloudflare Workers: use the incoming Request directly. Durable replay and transaction stores must use the production database or a strongly consistent store; isolate local, staging, and production bindings.",
+    "",
+    "For app " + appId + ", every exposed route must pass its exact required capability to authorizeIntelliteProxyRequest.",
+    "",
+    "## Python, Django, Flask, FastAPI, Ruby on Rails, and other native stacks",
+    "",
+    "Do not execute the JavaScript adapter through a subprocess or local sidecar and call that production integration. Implement the same protocol natively in the app's framework:",
+    "",
+    "- OAuth Authorization Code with PKCE S256 and server-side single-use state;",
+    "- exact issuer and same-origin metadata endpoint validation;",
+    "- exact callback URI and app-relative return path validation;",
+    "- stable Intellite user and organization mapping;",
+    "- ES256 JWKS verification of timestamp, method, path, query, body SHA-256, claims, audience, app ID, expiry, capability, and JTI;",
+    "- atomic replay protection for writes;",
+    "- current local tenant, user, role, and ACL authorization.",
+    "",
+    "Use the generated JavaScript modules as executable reference behavior and the examples as the language-neutral contract. Add native unit vectors matching the generated adapter tests.",
+    "",
+    "## Required route behavior",
+    "",
+    "Start connection:",
+    "",
+    "- require the current app session;",
+    "- require local tenant admin for install;",
+    "- persist transaction before redirecting;",
+    "- request only the capabilities needed by the flow.",
+    "",
+    "Callback:",
+    "",
+    "- consume state once before code exchange;",
+    "- re-check current local actor and tenant;",
+    "- reject callback errors and mismatches without exposing sensitive values;",
+    "- commit unique mappings and audit in an app transaction;",
+    "- revoke short-lived connection evidence when no longer needed;",
+    "- redirect only to the stored app-relative path.",
+    "",
+    "Disconnect:",
+    "",
+    "- require current local authorization and confirmation;",
+    "- mark mapping inactive instead of deleting business users or roles;",
+    "- revoke active connection evidence where available;",
+    "- preserve normal app sessions unless the user explicitly logs out;",
+    "- audit idempotently.",
+    "",
+    "Signed business route:",
+    "",
+    "- verify the signed request and body before parsing trusted business input;",
+    "- resolve active mappings;",
+    "- evaluate current local role and resource ACL;",
+    "- consume JTI for writes;",
+    "- execute business logic through existing services;",
+    "- record app audit and return an honest result.",
+    "",
+    "## Error contract",
+    "",
+    "Use stable app-owned error codes and safe user messages. Distinguish unauthenticated, connection required, mapping conflict, permission denied, stale connection, replay, invalid signed request, validation failure, dependency failure, and business conflict. Do not return tokens, codes, state, verifier, signing payloads, raw SQL errors, or stack traces."
+  ].join("\n") + "\n";
+}
+
+function guidanceTemplates(manifest) {
+  const appId = guidanceAppId(manifest);
+  const requirements = integrationRequirementsObject(manifest);
+  return [
+    {
+      path: APP_AI_ENTRYPOINT,
+      content: aiImplementationGuideTemplate(manifest)
+    },
+    {
+      path: APP_REQUIREMENTS_FILE,
+      content: `${JSON.stringify(requirements, null, 2)}\n`
+    },
+    {
+      path: `${APP_GUIDANCE_DIR}/examples/storage-and-audit.md`,
+      content: storageAndAuditGuideTemplate()
+    },
+    {
+      path: `${APP_GUIDANCE_DIR}/examples/framework-recipes.md`,
+      content: frameworkRecipesGuideTemplate(manifest)
+    },
     {
       path: `${APP_GUIDANCE_DIR}/agent-guidance.md`,
       content: `<!-- intellite-app-guidance-version: ${APP_GUIDANCE_VERSION} -->
 # Intellite App Agent Guidance
 
 This project-local file teaches AI coding agents how to work on this repository as an Intellite app. Keep it in the repo. Do not install it into global skill directories.
+
+Start with .intellite/IMPLEMENT_INTELLITE.md. It is the complete implementation runbook. The machine-readable completion contract is .intellite/integration-requirements.json.
 
 ## Boundary
 
@@ -2487,6 +2932,15 @@ async function listSkills() {
   })), null, 2));
 }
 
+function appAiHandoff(projectRoot) {
+  return {
+    aiEntryPoint: APP_AI_ENTRYPOINT,
+    aiEntryPointPath: path.resolve(projectRoot, APP_AI_ENTRYPOINT),
+    requirementsPath: path.resolve(projectRoot, APP_REQUIREMENTS_FILE),
+    aiInstruction: "Read .intellite/IMPLEMENT_INTELLITE.md and .intellite/integration-requirements.json, inspect the existing app, implement every required deliverable, and do not declare completion before app doctor and the staging probe pass."
+  };
+}
+
 async function appInit(args) {
   const output = argValue(args, "--output", "intellite.app.json");
   const filePath = path.resolve(output);
@@ -2501,7 +2955,7 @@ async function appInit(args) {
   const manifest = sampleAppManifest();
   await fs.writeFile(filePath, JSON.stringify(manifest, null, 2), { mode: 0o644 });
   const guidance = await writeAppGuidance(projectRoot, manifest, { refresh: false });
-  console.log(JSON.stringify({ ok: true, filePath, guidance }, null, 2));
+  console.log(JSON.stringify({ ok: true, filePath, guidance, ...appAiHandoff(projectRoot) }, null, 2));
 }
 
 async function appAdopt(args) {
@@ -2532,20 +2986,35 @@ async function appAdopt(args) {
   const guidance = await writeAppGuidance(projectRoot, manifest, { refresh: false });
   const framework = await detectProjectFramework(projectRoot, metadata);
   const routeCandidates = await detectedRouteCandidates(projectRoot);
+  const requirements = integrationRequirementsObject(manifest);
   const report = {
     generatedAt: new Date().toISOString(),
     appId,
     framework,
+    aiHandoff: appAiHandoff(projectRoot),
+    recommendedReadOrder: [
+      APP_AI_ENTRYPOINT,
+      APP_REQUIREMENTS_FILE,
+      ".intellite/adoption-report.json",
+      "intellite.app.json",
+      ".intellite/examples/storage-and-audit.md",
+      ".intellite/examples/oauth-connection.md",
+      ".intellite/examples/proxy-signature-verification.md",
+      ".intellite/examples/framework-recipes.md",
+      ".intellite/examples/usage-guide.md"
+    ],
+    completionCommands: requirements.completionCommands,
+    manualReviewRequired: requirements.manualReviewRequired,
     routeCandidates,
     automaticExposure: [],
     requiredActions: [
-      "Replace any .example.invalid staging and production URLs in intellite.app.json.",
-      "Import intellite/intellite-proxy.mjs in the app routes declared in proxyRoutes.",
-      "Implement an app-owned durable OAuth transaction store before importing intellite/intellite-oauth.mjs.",
-      "Add explicit install/link callback routes without changing the existing login route or user table.",
-      "Implement GET /api/usage-guide and require the app read capability.",
-      "Review routeCandidates and add only approved routes with narrow capabilities.",
-      "Use an atomic durable replayStore.consume implementation for every state-changing route."
+      "Read .intellite/IMPLEMENT_INTELLITE.md and .intellite/integration-requirements.json before editing the app.",
+      "Trace and preserve the existing login, session, tenant, user, role, ACL, database, audit, and deployment authority paths.",
+      "Replace every sample manifest value and review routeCandidates; expose only approved routes with narrow capabilities.",
+      "Add app-owned migrations, durable OAuth transactions, stable organization and user mappings, replay protection, and audit records.",
+      "Implement connect, callback, disconnect, proxy authorization, usage guide, and connection status UI without replacing existing authentication.",
+      "Add OAuth attack tests, signature and replay tests, mapping conflict tests, local ACL denial tests, and existing-auth regression tests.",
+      "Pass app doctor, publish to staging, pass the signed staging probe, and complete every manual review item before claiming compatibility."
     ],
     jwks: {
       staging: `${ENVIRONMENTS.staging.baseUrl}/.well-known/intellite-app-proxy-jwks.json`,
@@ -2562,6 +3031,7 @@ async function appAdopt(args) {
     routeCandidateCount: routeCandidates.length,
     reportPath,
     guidance,
+    ...appAiHandoff(projectRoot),
     requiresUrlConfiguration: stagingUrl.endsWith(".example.invalid") || productionUrl.endsWith(".example.invalid")
   }, null, 2));
 }
@@ -2670,8 +3140,54 @@ async function appRefresh(args) {
     filePath,
     validationOk: result.ok,
     guidance,
-    validation: { errors: result.errors, warnings: result.warnings }
+    validation: { errors: result.errors, warnings: result.warnings },
+    ...appAiHandoff(path.dirname(filePath))
   }, null, 2));
+}
+
+function doctorNextActions(checks, probeCheck) {
+  const actions = [];
+  const seen = new Set();
+  const add = (check, action, guide, command = "") => {
+    const key = `${guide}\n${command}\n${action}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    actions.push({ check, action, guide, ...(command ? { command } : {}) });
+  };
+
+  for (const check of checks.filter((item) => !item.ok)) {
+    const name = textValue(check.name);
+    if (name === "manifest-valid" || name.startsWith("project-values:") || name.startsWith("environment:") || name.startsWith("proxy-route:") || name === "usage-guide-route" || name === "skill-package" || name === "production-review-required") {
+      add(name, "Replace sample values and make intellite.app.json match the app's real routes, capabilities, environments, and risk controls.", APP_AI_ENTRYPOINT, "npx intellite app validate intellite.app.json && npx intellite app conformance intellite.app.json");
+      continue;
+    }
+    if (name.startsWith("guidance:")) {
+      add(name, "Refresh project-local Intellite guidance. Review every reported conflict .new file instead of overwriting app-owned edits.", APP_AI_ENTRYPOINT, "npx intellite app refresh intellite.app.json");
+      continue;
+    }
+    if (name === "implementation:proxy-verifier-integrated" || name === "implementation:capability-enforcement" || name === "implementation:existing-app-role-acl") {
+      add(name, "Integrate signed proxy verification and enforce the requested capability, active stable-ID mappings, and the app's current role or ACL on every exposed route.", ".intellite/examples/proxy-signature-verification.md");
+      continue;
+    }
+    if (name === "implementation:durable-replay-store") {
+      add(name, "Add a durable atomic JTI replay ledger for every state-changing signed request.", ".intellite/examples/storage-and-audit.md");
+      continue;
+    }
+    if (name === "implementation:oauth-connection") {
+      add(name, "Implement app-owned connection start, single-use OAuth callback, stable organization and user mappings, local actor re-authorization, and disconnect.", ".intellite/examples/framework-recipes.md");
+      continue;
+    }
+    if (name === "implementation:usage-guide-endpoint") {
+      add(name, "Implement the read-only usage guide from the app's real supported operations and protect it with the declared read capability.", ".intellite/examples/usage-guide.md");
+      continue;
+    }
+    add(name, "Resolve this failed readiness check by following the complete implementation runbook and rerun app doctor.", APP_AI_ENTRYPOINT, "npx intellite app doctor intellite.app.json");
+  }
+
+  if (!probeCheck.ok) {
+    add(probeCheck.name || "runtime:staging-probe", "After local readiness passes, publish the exact manifest to staging and verify a real signed request against the staging app route.", APP_AI_ENTRYPOINT, "npx intellite --env staging app publish intellite.app.json --app-env staging && npx intellite --env staging app probe intellite.app.json");
+  }
+  return actions;
 }
 
 async function appDoctor(args) {
@@ -2690,6 +3206,7 @@ async function appDoctor(args) {
     ...implementation.checks
   ];
   const ok = result.ok && checks.every((check) => check.ok);
+  const projectRoot = path.dirname(filePath);
   console.log(JSON.stringify({
     ok,
     localReady: ok,
@@ -2701,7 +3218,11 @@ async function appDoctor(args) {
     validation: { errors: result.errors, warnings: result.warnings },
     checks,
     implementationEvidenceFiles: implementation.evidenceFiles,
-    runtimeChecks: [probeCheck]
+    runtimeChecks: [probeCheck],
+    nextActions: doctorNextActions(checks, probeCheck),
+    manualReviewRequired: integrationManualReviewItems(),
+    completionRule: "Fully Intellite-compatible requires localReady, runtimeReady, and explicit completion of every manualReviewRequired item.",
+    ...appAiHandoff(projectRoot)
   }, null, 2));
   if (!ok) process.exitCode = 1;
 }

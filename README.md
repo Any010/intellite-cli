@@ -107,9 +107,22 @@ npx intellite --env staging app request-production-review intellite.app.json
 `init`, `adopt`, `validate`, `conformance`, `refresh`, and `doctor` are local commands. `publish --app-env staging` sends a validated manifest to the selected Intellite environment and registers the app for the signed-in organization. `probe` uses a real signed app-call ticket and succeeds only when the app rejects unsigned and tampered calls while accepting the valid signed call. `request-production-review` requires a current successful staging probe and stores a production manifest as pending review; it is not active until platform approval. Production publication is intentionally not self-service.
 `app list` shows the manifest versions and environments registered for the signed-in developer organization.
 
-`app init` scaffolds the current `schemaVersion: 2` manifest and project-local AI guidance under `.intellite/`. It does not write global skills or touch `~/.codex/skills`. The generated manifest contains sample app ID and sample URLs; replace them before running `app doctor`, `app publish`, or `app request-production-review`. In addition to capabilities, roles, environments, proxy routes, and skills, v2 manifests can declare:
+`app init` scaffolds the current `schemaVersion: 2` manifest and versioned, project-local AI guidance under `.intellite/`. It does not write global skills or touch `~/.codex/skills`. The generated manifest contains sample app ID and sample URLs; replace them before running `app doctor`, `app publish`, or `app request-production-review`.
 
 `app adopt` is for an existing business application. It detects common frameworks and existing API route candidates, creates a project-specific manifest, and generates `intellite/intellite-proxy.mjs`. Detected business routes are written to `.intellite/adoption-report.json` for review and are never exposed automatically. Only the read-only usage-guide route is placed in the initial manifest.
+
+Both commands generate these AI handoff files:
+
+- `.intellite/IMPLEMENT_INTELLITE.md`: the single implementation runbook for an AI coding agent;
+- `.intellite/integration-requirements.json`: machine-readable authority boundaries, forbidden changes, required deliverables, verification commands, and manual review requirements;
+- `.intellite/examples/storage-and-audit.md`: durable OAuth state, stable-ID mapping, replay, audit, transaction, cleanup, and recovery semantics;
+- `.intellite/examples/framework-recipes.md`: placement guidance for Node.js, Next.js, Express, Fastify, Hono, Workers, Python, Django, Flask, FastAPI, Rails, and other stacks.
+
+Give the AI this exact instruction from the CLI JSON output:
+
+> Read `.intellite/IMPLEMENT_INTELLITE.md` and `.intellite/integration-requirements.json`, inspect the existing app, implement every required deliverable, and do not declare completion before `app doctor` and the staging probe pass.
+
+The runbook requires the AI to trace the app's real authentication, session, tenant, user, role/ACL, database, audit, test, and deployment paths before editing. It covers manifest design, app-owned migrations, OAuth connection UX, stable-ID mapping, signed request verification, current local authorization, replay protection, audit, attack tests, existing-auth regression tests, staging publication, and runtime proof. Static source detection alone is not presented as production completion: `app doctor` reports concrete next actions and manual review items, while `app probe` supplies signed runtime evidence.
 
 It also generates `intellite/intellite-oauth.mjs` and exact callback URLs for the standard existing-app connection flow. The app keeps its current login, sessions, users, tenants, roles, and APIs. Intellite OAuth Authorization Code + PKCE is used only to link a logged-in local actor to stable Intellite user and organization IDs. It must not auto-link by email. The optional `login` handoff succeeds only when the app resolves an active pre-existing stable-ID mapping.
 
@@ -129,7 +142,7 @@ The final permission is always the intersection of the requested capability, the
 
 If a skill package has no signature, local validation reports a warning. Intellite signs unsigned skill packages server-side during staging publish and production review when the platform signing secret is configured.
 
-`app refresh` updates `.intellite/agent-guidance.md` and `.intellite/examples/` from the current CLI templates. Files that still match the last generated hash are updated in place. User-edited files are not overwritten; the new version is written next to them as `.new`.
+`app refresh` updates `.intellite/IMPLEMENT_INTELLITE.md`, `.intellite/integration-requirements.json`, `.intellite/agent-guidance.md`, and `.intellite/examples/` from the current CLI templates. Files that still match the exact previously generated content fingerprint are updated in place. User-edited files are not overwritten; the new version is written next to them as `.new` for explicit review.
 
 `app doctor` runs manifest validation, conformance checks, sample-value readiness checks, guidance freshness checks, and source-level implementation checks for OAuth route integration, proxy verification, stable-ID mapping, existing-app role/ACL enforcement, usage-guide routing, capability enforcement, and durable replay handling. Generated adapter files are excluded from implementation evidence, so their presence alone cannot make the doctor pass. Runtime readiness is reported separately from the latest staging `app probe` result.
 

@@ -122,6 +122,13 @@ if (!cli.includes("app refresh [FILE]")) fail("CLI must expose the project-local
 if (!cli.includes("app doctor [FILE]")) fail("CLI must expose the local app doctor command.");
 if (!cli.includes("schemaVersion: 2")) fail("CLI app init must scaffold the current manifest schema.");
 if (!cli.includes("APP_GUIDANCE_VERSION")) fail("CLI must version project-local app guidance.");
+if (!cli.includes("APP_AI_ENTRYPOINT")) fail("CLI must expose one project-local AI implementation entrypoint.");
+if (!cli.includes("integration-requirements.json")) fail("CLI must generate a machine-readable integration completion contract.");
+if (!cli.includes("Implement Intellite in This Existing App")) fail("CLI must generate the complete existing-app AI implementation runbook.");
+if (!cli.includes("storage-and-audit.md")) fail("CLI must generate durable storage, replay, and audit guidance.");
+if (!cli.includes("framework-recipes.md")) fail("CLI must generate framework placement guidance.");
+if (!cli.includes("manualReviewRequired")) fail("CLI must report production checks that static detection cannot prove.");
+if (!cli.includes("doctorNextActions")) fail("CLI doctor must translate failed checks into concrete implementation actions.");
 if (!cli.includes("guidance-lock.json")) fail("CLI must track generated guidance hashes.");
 if (!cli.includes("Do not install it into global skill directories")) fail("CLI guidance must be project-local, not global skill sync.");
 if (!cli.includes("unsafeProxyPathPatternReason")) fail("CLI must mirror server-side proxy regex safety checks.");
@@ -155,6 +162,12 @@ if (!readme.includes("keeps its current login, sessions, users, tenants, roles, 
 }
 if (!readme.includes("Generated adapter files are excluded from implementation evidence")) {
   fail("README must explain that generated files do not satisfy doctor integration checks.");
+}
+if (!readme.includes(".intellite/IMPLEMENT_INTELLITE.md") || !readme.includes(".intellite/integration-requirements.json")) {
+  fail("README must document the project-local AI handoff files.");
+}
+if (!readme.includes("do not declare completion before `app doctor` and the staging probe pass")) {
+  fail("README must give the AI an explicit production completion gate.");
 }
 
 console.log("verify-package: ok");
