@@ -624,8 +624,11 @@ function sampleAppManifest() {
   };
 }
 
-function sha256Hex(value) {
-  return crypto.createHash("sha256").update(value, "utf8").digest("hex");
+function generatedContentFingerprint(value) {
+  return crypto
+    .createHmac("sha256", "intellite-generated-content-fingerprint-v1")
+    .update(value, "utf8")
+    .digest("hex");
 }
 
 function guidanceAppId(manifest) {
@@ -1391,7 +1394,7 @@ async function writeAppGuidance(projectRoot, manifest, { refresh = false } = {})
   for (const template of templates) {
     const filePath = assertProjectLocalPath(projectRoot, template.path);
     const relativePath = projectRelativePath(projectRoot, filePath);
-    const desiredHash = sha256Hex(template.content);
+    const desiredHash = generatedContentFingerprint(template.content);
     const previousHash = textValue(previousFiles[relativePath]?.sha256);
     await ensureDirectoryNoSymlink(path.dirname(filePath), projectRoot);
 
@@ -1411,7 +1414,7 @@ async function writeAppGuidance(projectRoot, manifest, { refresh = false } = {})
       continue;
     }
 
-    const existingHash = sha256Hex(existing);
+    const existingHash = generatedContentFingerprint(existing);
     if (existingHash === desiredHash) {
       results.push({ path: relativePath, status: "unchanged" });
       nextLockFiles[relativePath] = { sha256: desiredHash };
@@ -1447,12 +1450,12 @@ async function appGuidanceStatus(projectRoot, manifest) {
   for (const template of templates) {
     const filePath = assertProjectLocalPath(projectRoot, template.path);
     const relativePath = projectRelativePath(projectRoot, filePath);
-    const desiredHash = sha256Hex(template.content);
+    const desiredHash = generatedContentFingerprint(template.content);
     let status = "missing";
     let ok = false;
     try {
       const existing = await readTextFileNoSymlink(filePath);
-      const existingHash = sha256Hex(existing);
+      const existingHash = generatedContentFingerprint(existing);
       if (existingHash === desiredHash) {
         status = "current";
         ok = true;
@@ -1576,7 +1579,7 @@ async function implementationEvidence(projectRoot, manifest) {
 }
 
 function manifestFingerprint(manifest) {
-  return sha256Hex(JSON.stringify(manifest));
+  return generatedContentFingerprint(JSON.stringify(manifest));
 }
 
 function probeResultPath(projectRoot) {
