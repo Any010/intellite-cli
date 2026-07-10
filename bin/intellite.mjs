@@ -625,10 +625,7 @@ function sampleAppManifest() {
 }
 
 function generatedContentFingerprint(value) {
-  return crypto
-    .createHmac("sha256", "intellite-generated-content-fingerprint-v1")
-    .update(value, "utf8")
-    .digest("hex");
+  return Buffer.from(value, "utf8").toString("base64url");
 }
 
 function guidanceAppId(manifest) {
@@ -1395,7 +1392,7 @@ async function writeAppGuidance(projectRoot, manifest, { refresh = false } = {})
     const filePath = assertProjectLocalPath(projectRoot, template.path);
     const relativePath = projectRelativePath(projectRoot, filePath);
     const desiredHash = generatedContentFingerprint(template.content);
-    const previousHash = textValue(previousFiles[relativePath]?.sha256);
+    const previousHash = textValue(previousFiles[relativePath]?.fingerprint || previousFiles[relativePath]?.sha256);
     await ensureDirectoryNoSymlink(path.dirname(filePath), projectRoot);
 
     let existing = "";
@@ -1410,28 +1407,28 @@ async function writeAppGuidance(projectRoot, manifest, { refresh = false } = {})
     if (!exists) {
       await writeTextFileNoSymlink(filePath, template.content);
       results.push({ path: relativePath, status: "created" });
-      nextLockFiles[relativePath] = { sha256: desiredHash };
+      nextLockFiles[relativePath] = { fingerprint: desiredHash };
       continue;
     }
 
     const existingHash = generatedContentFingerprint(existing);
     if (existingHash === desiredHash) {
       results.push({ path: relativePath, status: "unchanged" });
-      nextLockFiles[relativePath] = { sha256: desiredHash };
+      nextLockFiles[relativePath] = { fingerprint: desiredHash };
       continue;
     }
 
     if (refresh && previousHash && existingHash === previousHash) {
       await writeTextFileNoSymlink(filePath, template.content);
       results.push({ path: relativePath, status: "updated" });
-      nextLockFiles[relativePath] = { sha256: desiredHash };
+      nextLockFiles[relativePath] = { fingerprint: desiredHash };
       continue;
     }
 
     const newPath = await nextNewFilePath(filePath, template.content);
     await writeTextFileNoSymlink(newPath, template.content);
     results.push({ path: relativePath, status: "conflict", newPath: projectRelativePath(projectRoot, newPath) });
-    nextLockFiles[relativePath] = previousHash ? { sha256: previousHash } : {};
+    nextLockFiles[relativePath] = previousHash ? { fingerprint: previousHash } : {};
   }
 
   await writeGuidanceLock(projectRoot, nextLockFiles);
@@ -1459,7 +1456,7 @@ async function appGuidanceStatus(projectRoot, manifest) {
       if (existingHash === desiredHash) {
         status = "current";
         ok = true;
-      } else if (textValue(files[relativePath]?.sha256) === existingHash) {
+      } else if (textValue(files[relativePath]?.fingerprint || files[relativePath]?.sha256) === existingHash) {
         status = "outdated";
       } else {
         status = "modified";
@@ -1579,7 +1576,7 @@ async function implementationEvidence(projectRoot, manifest) {
 }
 
 function manifestFingerprint(manifest) {
-  return generatedContentFingerprint(JSON.stringify(manifest));
+  return crypto.createHash("sha256").update(JSON.stringify(manifest), "utf8").digest("hex");
 }
 
 function probeResultPath(projectRoot) {

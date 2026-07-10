@@ -175,7 +175,9 @@ test("app init scaffolds the current schema v2 manifest and validates offline", 
     const oauthAdapter = await fs.readFile(oauthPath, "utf8");
     assert.match(oauthAdapter, /createIntelliteConnectionRequest/);
     assert.match(oauthAdapter, /completeIntelliteConnectionCallback/);
-    assert.equal(JSON.parse(await fs.readFile(lockPath, "utf8")).kind, "app-guidance");
+    const guidanceLock = JSON.parse(await fs.readFile(lockPath, "utf8"));
+    assert.equal(guidanceLock.kind, "app-guidance");
+    assert.ok(Object.values(guidanceLock.files).every((entry) => typeof entry.fingerprint === "string" && entry.fingerprint.length > 0));
     assert.equal(await fileExists(path.join(home, ".codex")), false, "app init must not install global Codex skills");
 
     const validate = await runCli(["app", "validate", manifestPath], { home });
